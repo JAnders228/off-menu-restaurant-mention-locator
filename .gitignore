@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Data directories (do not commit large data files)
+data/raw/
+data/processed/
+data/test_temp/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# Other temporary files
+*~
+.DS_Store
