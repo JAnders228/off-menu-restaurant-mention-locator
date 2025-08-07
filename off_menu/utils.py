@@ -20,8 +20,10 @@ from typing import List, Tuple, Dict, Any, Optional
 # 2. Functions
 # =========================================================================
 
+
 def save_parquet_index_false(dataframe, output_dir):
     dataframe.to_parquet(output_dir, index=False)
+
 
 def try_read_parquet(filepath: str) -> pd.DataFrame | None:
     """
@@ -32,7 +34,7 @@ def try_read_parquet(filepath: str) -> pd.DataFrame | None:
 
     Args:
         filepath (str): The full path to the Parquet file to be read.
-    
+
     Returns:
         pd.DataFrame | None: The DataFrame loaded from the file on success,
                              or None if an error occurs.
@@ -57,18 +59,21 @@ def try_read_html_string_from_filepath(full_filepath) -> str | None:
 
     Args:
         full filepath (str): String of the full filepath to read from
-    
+
     Returns:
-        str | None: returns html_text(str) if there is an html file there. Otherwise, 
+        str | None: returns html_text(str) if there is an html file there. Otherwise,
         prints Error and returns None
     """
     try:
-        with open(full_filepath, 'r', encoding='utf-8') as html:
+        with open(full_filepath, "r", encoding="utf-8") as html:
             html_text = html.read()
             return html_text
     except FileNotFoundError:
-        print(f"Error: The file was not found at {full_filepath}. Did it save correctly?")
+        print(
+            f"Error: The file was not found at {full_filepath}. Did it save correctly?"
+        )
         return None
+
 
 def extract_html(url: str) -> str | None:
     """
@@ -97,11 +102,12 @@ def extract_html(url: str) -> str | None:
         # - ConnectionError (no internet, host unreachable)
         # - Timeout (request took too long)
         print(f"  WARNING: Failed to extract HTML from {url}: {e}")
-        return None # Return None to indicate failure
+        return None  # Return None to indicate failure
     except Exception as e:
         # Catch any other unexpected errors
         print(f"  WARNING: An unexpected error occurred for {url}: {e}")
         return None
+
 
 def save_text_to_file(content: str, filename: str, directory: str) -> None:
     """
@@ -116,10 +122,11 @@ def save_text_to_file(content: str, filename: str, directory: str) -> None:
     Returns:
         None: The function saves the text to the specified directory
     """
-    full_filepath = os.path.join(directory, filename) # Constructs the filepath
-    os.makedirs(directory, exist_ok=True) # ensures directory exists, creates it if not
-    with open(full_filepath, 'w', encoding='utf-8') as file:
+    full_filepath = os.path.join(directory, filename)  # Constructs the filepath
+    os.makedirs(directory, exist_ok=True)  # ensures directory exists, creates it if not
+    with open(full_filepath, "w", encoding="utf-8") as file:
         file.write(content)
+
 
 def num_check(text) -> bool:
     """
