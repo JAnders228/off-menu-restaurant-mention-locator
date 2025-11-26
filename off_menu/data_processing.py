@@ -582,7 +582,7 @@ def extract_clean_text_and_periodic_timestamps(
 ) -> None:
     """
     Takes the full episodes metadata filepath, the transcripts html directory, and an output filepath, and iterates
-    through the epusides, processing the html into clean transcript text and collating the periodic timestamps.
+    through the episodes, processing the html into clean transcript text and collating the periodic timestamps.
 
     These transcripts and periodic timestamps are saved in a dataframe, which is saves as a parquet file to the
     output filepath.

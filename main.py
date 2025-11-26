@@ -65,8 +65,8 @@ def main():
 
         # =====================================================================
         # STAGE 2: Preliminary Processing (Generate Full URLs for Transcripts)
-        # Goal: Take basic metadata, clean guest names, and generate the *exact*
-        #       URLs needed for downloading each transcript's HTML.
+        # Goal: Take basic metadata, clean guest names, and generate the exact
+        # URLs needed for downloading each transcript's HTML.
         # =====================================================================
         print(
             "\n--- STAGE 2: Processing Episode Metadata & Generating Transcript URLs ---"
