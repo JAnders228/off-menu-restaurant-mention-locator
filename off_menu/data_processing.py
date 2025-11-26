@@ -10,9 +10,11 @@ from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 from fuzzywuzzy import process
 from fuzzywuzzy import fuzz
+import unicodedata
 
 from .utils import try_read_html_string_from_filepath, try_read_parquet
 from .config import transcript_base_url
+from .data_extraction import orchestrate_scraper
 
 # =========================================================================
 # 2. Configuration (paths, constants, etc.)
@@ -34,108 +36,64 @@ episodes_html_filepath = os.path.join(
 # Episodes processing
 # -------------------------------------------------------------------------
 
-
-def _num_check(text: str) -> bool:
-    """Checks if a string represents an integer, handling positive and negative numbers."""
-    if not text:
-        return False
-    if text[0] == "-":
-        return text[1:].isdigit()
-    return text.isdigit()
-
-
-#  Helper function to identify the index after the first number ends, as some eps don't have the colon splitting the title and number
-def _find_num_end(tag: BeautifulSoup) -> Optional[int]:
+# Helper function to create slugs, which will be used as unique ep identifiers now that numbers 
+# are no longer give, and will form the end of URL's
+# Used in create_ep_slugs_and_guests_from_html
+def slugify(text: str) -> str:
     """
-    Finds the index where a number ends in a BeautifulSoup Tag's text.
-
-    Args:
-        tag (BeautifulSoup): The BeautifulSoup Tag element to scan.
-
-    Returns:
-        Optional[int]: The index after the number ends, or None if not found.
+    Convert text to a simple dash-separated, lowercase slug.
+    Example: "Richard Herring (Bonus Episode)" -> "richard-herring-bonus-episode"
     """
-    text = tag.text
-    counter = 0
-    while counter < len(text) - 1:
-        if text[counter].isdigit() and not text[counter + 1].isdigit():
-            return counter + 1
-        else:
-            counter += 1
-            continue
+    s = unicodedata.normalize("NFKD", text or "")
+    # remove parentheses but keep their content separated by space
+    s = s.replace("(", " ").replace(")", " ")
+    # remove all characters except word chars, whitespace and hyphen
+    s = re.sub(r"[^\w\s-]", "", s)
+    # collapse whitespace to single dash and strip leading/trailing dashes
+    s = re.sub(r"\s+", "-", s).strip("-")
+    return s.lower()
 
-
-def _name_num_split(episode_tag: BeautifulSoup) -> Optional[Tuple[str, str]]:
+# Helper function to generate the guests name from the raw ep title, needed to match episodes to restaurant mentions
+# Restaurant mentions are listed by guest name, not ep number or slug
+# Used in create_ep_slugs_and_guests_from_html
+def extract_guest_name(raw_title: str) -> str:
     """
-    Splits an episode's HTML tag into its name and number.
-
-    Args:
-        episode_tag (BeautifulSoup): The episode's BeautifulSoup Tag element.
-
-    Returns:
-        Optional[Tuple[str, str]]: A tuple containing the episode name and number,
-                                   or None if the episode is not in a standard format.
+    Extract guest name using the simple rule:
+      - split on first colon ':'
+      - take the right hand side if a separator exists
+      - remove any trailing parenthetical content e.g. ' (Bonus Episode)'
+      - strip whitespace
     """
-    split = []
-    text = episode_tag.text
-    break_point = _find_num_end(episode_tag)
-    split.append(text[:break_point])
-    split.append(text[break_point:])
-    #  The following splits the name before the number (ep number) by space, and then selects the number
-    #  It only works for regular episodes
-    number = split[0].split()[1]
-    # Deal with "best of" episodes or episodes without numbers (not included)
-    if _num_check(number) == False:
-        return "not in standard form"
-    # Format name - just the slice beyond the break unless there are "("
-    if "(" in split[1]:
-        name = split[1].split("(")[0].strip(":").strip()
-        return (name, number)
+    if not raw_title:
+        return ""
+
+    s = raw_title.strip()
+
+    # Split on the first recognized separator in the remaining string.
+    # We prefer colon first as your original method did; then hyphens or em-dash.
+    if ":" in s:
+        parts = s.split(":", 1)
+        candidate = parts[1].strip()
     else:
-        name = split[1].strip(":").strip()
-        return (name, number)
+        # no separator found: either the whole string *is* the guest (as for new episodes)
+        candidate = s
+
+    # remove any parenthetical content at end or inside e.g "Name (Live) extra"
+    candidate = re.sub(r"\(.*?\)", "", candidate).strip()
+
+    # final clean: collapse multiple spaces
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+
+    return candidate
 
 
-def _create_epnumber_epname_dict(html_string: str) -> Tuple[Dict[int, str], List[Any]]:
-    """
-    Extracts episode numbers and names from the Off Menu episodes site HTML.
 
-    Args:
-        html_string (str): The HTML content of the Off Menu episodes page.
-
-    Returns:
-        Tuple[Dict[int, str], List[Any]]: A tuple containing:
-            - A dictionary where keys are episode numbers (int) and values are episode names (str).
-            - A list of episodes that were not included (e.g., special episodes).
-    """
-    episodes_site_html = BeautifulSoup(html_string, features="html.parser")
-    episode_elements = episodes_site_html.find_all("div", class_="image-slide-title")
-    numbers_and_names = {}
-    not_included = []
-    counter = 0
-    # Loop through the items
-    for item in episode_elements:
-        name = _name_num_split(item)[0]
-        number = _name_num_split(item)[1]
-        #  Deal with non standard episodes
-        if _num_check(number) == False:
-            not_included.append(counter)
-            counter += 1
-            continue
-        else:
-            numbers_and_names[int(number)] = name
-    return numbers_and_names, not_included
-
-
+# Function to create a url from new dataframe rows in episodes metadata (slugs version)
+# Replaces old version of _create_url_from_row
 def _create_url_from_row(row: pd.Series) -> str:
     """Creates a podscripts transcript URL from an episode's metadata."""
-    num = row["episode_number"]
-    first_name = row["guest_name"].split()[0].lower()
-    if len(row["guest_name"].split()) > 1:
-        second_name = row["guest_name"].split()[1].lower()
-    else:
-        second_name = ""
-    url = f"{transcript_base_url}ep-{num}-{first_name}-{second_name}"
+    slug = row["slug"]
+    url = f"{transcript_base_url}{slug}"
     return url
 
 
@@ -234,7 +192,7 @@ def _clean_transcript_str_from_html(html_filepath: str) -> str:
 
 
 def _extract_timestamps_as_list_of_dicts(
-    transcript_str: str, ep_num: int
+    transcript_str: str, slug: str
 ) -> List[Dict[str, Any]]:
     """
     Finds all 'starting point is HH:MM:SS' timestamps in a transcript string.
@@ -252,9 +210,9 @@ def _extract_timestamps_as_list_of_dicts(
 
         # Get the starting index of the entire match
         start_position_in_text = match.start()
-        # Store this as a dict with episode_number as key
+        # Store this as a dict with episode_slug as key
         stamp_dict = {
-            "episode_number": ep_num,
+            "slug": slug,
             "timestamp": actual_time_string,
             "start_index": start_position_in_text,
         }
@@ -422,41 +380,66 @@ def _matches_by_res_name_from_list_of_res_names(
 # Epsisode metadata processsing
 # -------------------------------------------------------------------------
 
+# Function to create slugs and guest names from html 
+# Replaces create_numbers_names_dict_from_html
 
-def create_numbers_names_dict_from_html(episodes_html_filepath: str) -> Dict[int, str]:
-    """Taken the html filepath of the episodes site and collates a dictionary of numbers
-    and names.
-
-    Args:
-        episodes_html_filepath (str): the filepath for the episodes site html
-    Returns:
-        Dict[int, str]: A dictionary where the keys are numbers and the values names of the episodes
+def create_tuple_inc_ep_slugs_and_guests_list_from_html(html_string: str) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
-    html_str = try_read_html_string_from_filepath(episodes_html_filepath)
-    numbers_names_dict = _create_epnumber_epname_dict(html_str)[
-        0
-    ]  # _create_epnumber_epname_dict returns a tuple (not inc list too), hence [0]
-    return numbers_names_dict
+    Parse episodes HTML and return a tuple:
+      (
+        [list of valid episode records],
+        [list of raw_titles for excluded 'Best of' episodes]
+      )
+    """
+    
+    soup = BeautifulSoup(html_string, "html.parser")
+    episode_divs = soup.find_all("div", class_="image-slide-title")
+
+    # 1. Initialize two separate lists
+    records: List[Dict[str, Any]] = []
+    exceptions: List[str] = [] 
+
+    for div in episode_divs:
+        raw_title = div.get_text(separator=" ", strip=True)
+        
+        # 2. Check the condition using the string method
+        if raw_title.startswith("Best of"):
+            # 3. If it is a "Best of" episode, append the title to the exceptions list
+            exceptions.append(raw_title)
+            # Skip the rest of the loop for this title and move to the next 'div'
+            continue
+        # menus to be buried with exception?
+        # christmas dinner party exception?
+            
+        # If the 'if' condition was false (i.e., it's a regular episode), the code continues here:
+        
+        guest_name = extract_guest_name(raw_title)
+        slug_full = slugify(raw_title)
+
+        records.append({
+            "raw_title": raw_title,
+            "slug": slug_full,
+            "guest_name": guest_name
+        })
+
+    # 4. Return both lists as a tuple
+    return records, exceptions
 
 
-def create_numbers_names_df_from_dict(numbers_names_dict: Dict) -> pd.DataFrame:
+# Function to create slugs and guest names dataframe from the dict made by create_ep_slugs_and_guests_from_html
+# Replaces create_numbers_names_df_from_dict
+
+def create_slugs_guests_df_from_list_of_dict(titles_list: Dict) -> pd.DataFrame:
     """
-    Takes the dict of numbers and names and returns a dataframe
+    Takes the list of dicts of raw titles, slugs and guest names and returns a dataframe
     """
-    df_episodes_metadata = pd.DataFrame.from_dict(
-        numbers_names_dict,
-        orient="index",  # means dict keys become "index" col in dataframe
-        columns=["guest_name"],  # means dict values
-    )
-    # Give the index a meaningful name
-    df_episodes_metadata.index.name = "episode_number"
-    # Reset the index to make 'episode_number' a regular column (instead of the index col)
-    # Note could be done in one step but less readable and pandas-idiomatic
-    df_episodes_metadata.reset_index(inplace=True)
+    df_episodes_metadata = pd.DataFrame(titles_list)
     return df_episodes_metadata
 
 
-def create_urls_and_save_to_numbers_names_df(
+# Function to action creating urls for each row of slugs and guests dataframe
+# Replaces create_urls_and_save_to_numbers_names_df
+def create_urls_and_save_to_slugs_guests_df(
     input_dataframe: pd.DataFrame, output_filepath: str
 ) -> None:
     """
@@ -479,6 +462,7 @@ def create_urls_and_save_to_numbers_names_df(
     df = input_dataframe
     df["url"] = df.apply(_create_url_from_row, axis=1)
     df.to_parquet(output_filepath)
+
 
 
 # -------------------------------------------------------------------------
@@ -535,7 +519,9 @@ def create_return_exploded_res_mentions_df(
     return exploded_restaurant_guest_df
 
 
-def combine_save_mentions_ep_metadata_dfs(
+# Function to combine the mentions dataframe with the ep metadata dataframe (new style, with slugs)
+# Replaces combine_save_mentions_ep_metadata_dfs
+def combine_save_mentions_and_ep_metadata_dfs(
     exploded_restaurants_guest_df: pd.DataFrame,
     ep_metadata_filepath: str,
     output_df_filepath: str,
@@ -564,7 +550,7 @@ def combine_save_mentions_ep_metadata_dfs(
     # Note .agg aggregates the data, it creates a new col called restaurants mentioned, from the col 'restaurant_name', applying the method 'dropna' to each group (restuarants that were in the restaurant_name cell), dropna gets rid of the NaN's
     # Note NaN's are placeholders for missing data (means ilterally not a number, which is confusing as it could be text...)
     ep_meta_and_mentions_df = (
-        merged_df.groupby(["episode_number", "guest_name", "url"], as_index=False)
+        merged_df.groupby(["guest_name", "url", "slug"], as_index=False, sort=False)
         .agg(restaurants_mentioned=("restaurant_name", lambda x: list(x.dropna())))
         .rename(columns={"restaurant_name": "restaurants_mentioned"})
     )
@@ -572,12 +558,13 @@ def combine_save_mentions_ep_metadata_dfs(
     ep_meta_and_mentions_df.to_parquet(output_df_filepath, index=False)
 
 
+
 # -------------------------------------------------------------------------
 # Cleaning transcripts & Collating timestamps
 # -------------------------------------------------------------------------
 
 
-def extract_clean_text_and_periodic_timestamps(
+def extract_save_clean_text_and_periodic_timestamps(
     full_episodes_metadata_path: str, transcripts_dir: str, output_filepath: str
 ) -> None:
     """
@@ -607,38 +594,39 @@ def extract_clean_text_and_periodic_timestamps(
 
     # 2. Iterate through each episode's metadata
     for index, row in episodes_df.iterrows():
-        episode_number = row.get("episode_number")
+        episode_slug = row.get("slug")
         guest_name = row.get("guest_name")
-        transcript_filename = f"ep_{episode_number}.html"
+        transcript_filename = f"{episode_slug}.html"
         transcript_filepath = os.path.join(transcripts_dir, transcript_filename)
-
+        restaurants_mentioned = row.get("restaurants_mentioned")
         # Confirm file exists and skip if not
         if not os.path.exists(transcript_filepath):
             print(
-                f"  WARNING: Transcript file not found for Episode {episode_number} ({guest_name}) at {transcript_filepath}. Skipping."
+                f"  WARNING: Transcript file not found for Episode {guest_name}, slug: {episode_slug} at {transcript_filepath}. Skipping."
             )
             continue  # Skip to the next episode
         try:
             clean_transcript_str = _clean_transcript_str_from_html(transcript_filepath)
             timestamps = _extract_timestamps_as_list_of_dicts(
-                clean_transcript_str, episode_number
+                clean_transcript_str, episode_slug
             )
 
             processed_records.append(
                 {
-                    "episode_number": episode_number,
+                    "slug": episode_slug,
                     "guest_name": guest_name,
+                    "restaurants_mentioned": restaurants_mentioned,
                     "clean_transcript_text": clean_transcript_str,
                     "periodic_timestamps": timestamps,  # This will be a list of dictionaries
                 }
             )
             print(
-                f"  Processed Episode {episode_number} ({guest_name}): Extracted text and {len(timestamps)} timestamps."
+                f"  Processed Episode {episode_slug} ({guest_name}): Extracted text and {len(timestamps)} timestamps."
             )
 
         except Exception as e:
             print(
-                f"  ERROR: Failed to process transcript for Episode {episode_number} ({guest_name}) from {transcript_filepath}: {e}"
+                f"  ERROR: Failed to process transcript for Episode {episode_slug} ({guest_name}) from {transcript_filepath}: {e}"
             )
             continue  # For MVP, just skip and warn
 
@@ -670,14 +658,14 @@ def combine_timestamps_and_metadata(
         transcripts_timestamps_filepath(str)
         metadata_filepath (str)
     Returns:
-        pd.DataFrame: A dataframe containing episode number, restaurants mentioned, clean transcript,
+        pd.DataFrame: A dataframe containing episode slug, restaurants mentioned, clean transcript,
         and timestamps.
     """
     metadata_df = try_read_parquet(metadata_filepath)
     transcripts_timestamps_df = try_read_parquet(transcripts_timestamps_filepath)
     combined_df = transcripts_timestamps_df.merge(
-        metadata_df[["episode_number", "restaurants_mentioned"]],
-        on="episode_number",
+        metadata_df[["slug", "restaurants_mentioned"]],
+        on="slug",
         how="left",
     )
     return combined_df
@@ -705,7 +693,7 @@ def find_top_match_and_timestamps(
     Returns:
         pd.DataFrame: A DataFrame where each row represents a restaurant mention. It contains
                       the following columns:
-                          - 'Episode ID': The episode number.
+                          - 'slug': The episode slug e.g. ep-217-ross-noble or elle-fanning
                           - 'Restaurant': The name of the restaurant mentioned.
                           - 'Mention text': The original sentence where the mention was found.
                           - 'Match Score': The fuzzy match score.
@@ -716,7 +704,7 @@ def find_top_match_and_timestamps(
     all_mentions_collected = []
 
     for index, combined_row in combined_df.iterrows():
-        episode_number = combined_row.get("episode_number")
+        slug = combined_row.get("slug")
         guest_name = combined_row.get("guest_name")
         clean_transcript_text = combined_row.get("clean_transcript_text")
         periodic_timestamps = combined_row.get("periodic_timestamps")
@@ -780,7 +768,7 @@ def find_top_match_and_timestamps(
                     )
 
                     mention = {
-                        "Episode ID": episode_number,
+                        "Episode ID": slug,
                         "Restaurant": restaurant_name_query,
                         "Mention text": original_sentence_text,
                         "Match Score": score,
@@ -791,7 +779,7 @@ def find_top_match_and_timestamps(
                     all_mentions_collected.append(mention)
                 else:
                     null_mention = {
-                        "Episode ID": episode_number,
+                        "Episode ID": slug,
                         "Restaurant": restaurant_name_query,
                         "Mention text": None,
                         "Match Score": 0,
@@ -802,7 +790,7 @@ def find_top_match_and_timestamps(
                     all_mentions_collected.append(null_mention)
         else:
             print(
-                f"  No raw mentions found in 'restaurants_mentioned' list for Episode {episode_number}. Skipping"
+                f"  No raw mentions found in 'restaurants_mentioned' list for Episode {slug}. Skipping"
             )
     combined_df = pd.DataFrame(all_mentions_collected)
     return combined_df
@@ -812,6 +800,7 @@ def find_top_match_and_timestamps(
 # 5. Script exectuion
 # This section contains script that runs only when this script is run directly when it is open (not when called by another script)
 # This will contain a smaller model of the processes, so we can test before implementing in main
+# N.B. OUTDATED
 # =========================================================================
 
 if __name__ == "__main__":
@@ -820,71 +809,42 @@ if __name__ == "__main__":
     # Epsisode metadata processsing
     # -------------------------------------------------------------------------
 
-    # ---Testing function to create numbers / names dict---
-    print(f"Episodes html filepath: {episodes_html_filepath}")
+    # Episode slugs and guest names extraction
+    print("=== Testing episode slugs and guests extraction ===")
+
+    # Small test HTML snippet or file path
+    episodes_html_filepath = os.path.join("data/test_temp", "episodes.html")
     try:
-        with open(episodes_html_filepath, "r", encoding="utf-8") as html:
-            html_text = html.read()
-        numbers_names_dict = _create_epnumber_epname_dict(html_text)[0]
-        print(f"First episode name: {numbers_names_dict[1]}")
+        with open(episodes_html_filepath, "r", encoding="utf-8") as f:
+            html_text = f.read()
+
+        # Create slug -> guest dict
+        slugs_guests_and_exclusions_tuple = create_tuple_inc_ep_slugs_and_guests_list_from_html(html_text)
+        slugs_guests_dict_list = slugs_guests_and_exclusions_tuple[0]
+        print("Sample slugs -> guest mapping:", list(slugs_guests_dict_list[:3]))
+
+        # Convert to DataFrame
+        df_episodes_metadata = create_slugs_guests_df_from_list_of_dict(slugs_guests_dict_list)
+        print("Episode metadata DF head:")
+        print(df_episodes_metadata.head())
+
     except FileNotFoundError:
-        print(
-            f"Error: The file was not found at {episodes_html_filepath}. Did it save correctly?"
-        )
+        print(f"Error: {episodes_html_filepath} not found.")
 
-    # ---Testing creating the dataframe of number / names (using full dict as quick)---
-
-    print(f"DEBUG: Type of numbers_names_dict: {type(numbers_names_dict)}")
-
-    # Create the dataframe, with dict keys as index, ep names as column
-    df_episodes_metadata = pd.DataFrame.from_dict(
-        numbers_names_dict,
-        orient="index",  # means dict keys become "index" col in dataframe
-        columns=["guest_name"],  # means dict values
-    )
-    # Give the index a meaningful name
-    df_episodes_metadata.index.name = "episode_number"
-    # Reset the index to make 'episode_number' a regular column (instead of the index col)
-    # Note could be done in one step but less readable and pandas-idiomatic
-    df_episodes_metadata.reset_index(inplace=True)
-    # Print head and info
-    print("DataFrame created successfully. Here's its head:")
-    print(df_episodes_metadata.head())
-    print("\nDataFrame information:")
-    df_episodes_metadata.info()  # Gives summary of columns and data types
 
     # ---Testing function to create URL's using dummy data---
 
-    data = {
-        "episode_number": [1, 2, 294],
-        "guest_name": ["James Acaster", "Ed Gamble", "Carey Mulligan"],
-    }
-    df = pd.DataFrame(data)
-
-    # Apply the function over each row of the df
-    df["url"] = df.apply(_create_url_from_row, axis=1)
-
-    # Print test output
-    print("Test output from adding URL to numbers and names df")
-    print(df.info())
-
-    # ---Testing applying URL function to numbers and names df?? Or does this belong in main...---
-
-    # Dummy data (head of the numbers and names dataframe)
-    # Note ep_meta_and_mentions_head already contains epnum, guestname, url, mentions
-    # NOT THE CORRECT DF TO BE TESTING THIS ON
-    # Apply the function
-    df_episodes_metadata["url"] = df_episodes_metadata.apply(
-        _create_url_from_row, axis=1
-    )
-    # Print output
-    print("\nTest adding URL to numbers and names")
-    print(df_episodes_metadata)
+    print("\n=== Testing URL creation ===")
+    df_episodes_metadata_with_urls_filepath = os.path.join(test_temp_dir, "df_episodes_metadata_with_urls.parquet")
+    create_urls_and_save_to_slugs_guests_df(df_episodes_metadata, df_episodes_metadata_with_urls_filepath)
+    df_episodes_metadata_with_urls = try_read_parquet(df_episodes_metadata_with_urls_filepath)
+    print("URLs added to DF head:")
+    print(df_episodes_metadata_with_urls.head())
 
     # -------------------------------------------------------------------------
     # Restaurant mentions processsing
     # -------------------------------------------------------------------------
-
+    print("\n=== Testing restaurant mentions processing ===")
     # ---Testing creating the restaurant mentions dict, converting into dataframe---
 
     # Collecting the html, creating dict
@@ -896,6 +856,7 @@ if __name__ == "__main__":
         restaurants_by_res_name_dict = _create_restaurants_by_res_name_dict(
             test_res_html_text
         )
+    print("\n===First ten restaurants and guests who mention them: ===")
     print(list(restaurants_by_res_name_dict.items())[:10])
 
     # 1. Create the dataframe, with guest mentioned still as a list
@@ -907,7 +868,7 @@ if __name__ == "__main__":
     mentions_raw_df = pd.DataFrame(
         mentions_raw_data, columns=["restaurant_name", "guests_mentioned"]
     )
-    print("Corrected mentions DataFrame (first 5 rows):\n", mentions_raw_df.head())
+    print("\n=== Corrected mentions DataFrame (first 5 rows):\n", mentions_raw_df.head())
 
     # 3. 'Explode' the dataframe, so each guest mention has their own row (the restairant name will be dupicated)
     restaurant_guest_df = mentions_raw_df.explode("guests_mentioned")
@@ -917,7 +878,7 @@ if __name__ == "__main__":
     restaurant_guest_df = restaurant_guest_df.rename(
         columns={"guests_mentioned": "guest_name"}
     )
-    print("Res mentions, numbers and names collated dataframe test")
+    print("\n===Res mentions, numbers and names collated dataframe test")
     print(restaurant_guest_df.head())
 
     # Saving dataframe so I can combine with episodes data
@@ -931,166 +892,75 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     # ---Testing merging restaurant mentions dataframe with numbers, names, url---
 
-    # Fetch restaurant/guest dataframe
-    filepath = os.path.join(test_temp_dir, "restaurant_mentions_test.parquet")
-    restaurant_mentions_test_df = try_read_parquet(filepath)
-    # Left merge on guest, with numbers, names, url (df_episodes_metadata)
-    merged_df = pd.merge(
-        df_episodes_metadata, restaurant_mentions_test_df, on="guest_name", how="left"
+    print("\n=== Testing combining episode metadata and mentions ===")
+    test_full_episodes_metadata_combined_path = os.path.join(test_temp_dir, "test_full_episodes_metadata_slugs_combined.parquet")
+    print(f"restaurant_guest_df type is {type(restaurant_guest_df)}")
+    print(f"df_episodes_metadata_with_urls type is {type(df_episodes_metadata_with_urls_filepath)}")
+    combine_save_mentions_and_ep_metadata_dfs(
+        restaurant_guest_df, df_episodes_metadata_with_urls_filepath, test_full_episodes_metadata_combined_path
     )
-    print("---Merged df head---")
-    print(merged_df.head())
-    # Aggregating rows so we have one row per episode, with a list of restaurant mentions
-    # Note groupby creates groups based on the args (three identical in this case). as_index False means also have an index col (don't use first col as index)
-    # Note .agg aggregates the data, it creates a new col called restaurants mentioned, from the col 'restaurant_name', applying the method 'dropna' to each group (restuarants that were in the restaurant_name cell), dropna gets rid of the NaN's
-    # Note NaN's are placeholders for missing data (means ilterally not a number, which is confusing as it could be text...)
+    combined_df_head = try_read_parquet(test_full_episodes_metadata_combined_path).head()
+    print("\n=== Combined df head ===")
+    print(combined_df_head.head())
 
-    ep_meta_and_mentions_df = (
-        merged_df.groupby(["episode_number", "guest_name", "url"], as_index=False)
-        .agg(restaurants_mentioned=("restaurant_name", lambda x: list(x.dropna())))
-        .rename(columns={"restaurant_name": "restaurants_mentioned"})
-    )
-
-    print("---Final (ep_meta_and_mentions) dataframe head---")
-    print(ep_meta_and_mentions_df.head())
-
-    # Saving the dataframe
-    test_processed_filepath = os.path.join(
-        test_temp_dir, "ep_meta_and_mentions.parquet"
-    )
-    ep_meta_and_mentions_df.to_parquet(test_processed_filepath, index=False)
-
-    # Saving just the head for testing purposes
-    head_filepath = os.path.join(test_temp_dir, "ep_meta_and_mentions_head.parquet")
-    ep_meta_and_mentions_head = ep_meta_and_mentions_df.head()
-    ep_meta_and_mentions_head.to_parquet(head_filepath, index=False)
+    # Saving combined df (metadata, res mentions) to filepath for use in timestamp collation function
+    combined_df_head_filepath = os.path.join(test_temp_dir, "combined_df_head")
+    combined_df_head.to_parquet(combined_df_head_filepath)
+    
 
     # -------------------------------------------------------------------------
-    # Cleaning transcripts
+    # Downloading transcripts
     # -------------------------------------------------------------------------
-
-    # ---Step 1: Test producing clean string transcript from html---
 
     # Testing transcript productinon
-    test_filepath = os.path.join(project_root, "data/test_temp/ep_1.html")
+    print("\n=== Testing transcript download ===")
+    transcripts_dir = os.path.join("data/test_temp", "transcripts_sample")
+    output_filepath = os.path.join("data/test_temp", "test_transcripts_data_processing_script.parquet")
 
-    def test_transcript_str(transcript_html_filepath):
-        try:
-            with open(test_filepath, "r", encoding="utf-8") as html:
-                html_text = html.read()
-            transcript_str = _clean_transcript_str_from_sentences(
-                _get_episode_sentences(html_text)
-            )
-            print(transcript_str[:100])
-            return transcript_str
-        except FileNotFoundError:
-            print(
-                f"Error: The file was not found at {test_filepath}. Did it save correctly?"
-            )
-
+    orchestrate_scraper(
+        df=combined_df_head,  # only a small batch for testing
+        base_url= transcript_base_url,
+        out_dir=transcripts_dir,
+        max_attempts_per_url=3,
+        max_workers=1)
     # -------------------------------------------------------------------------
-    # Cleaning and Collating timestamps function
+    # Cleaning and Collating timestamps from transcripts 
     # -------------------------------------------------------------------------
-
-    def test_extract_clean_text_and_periodic_timestamps(
-        full_episodes_metadata_path, transcripts_dir, output_filepath
-    ):
-        # 1. Load episodes meta_data
-        episodes_df = try_read_parquet(full_episodes_metadata_path)
-        if episodes_df is None or episodes_df.empty:
-            print(
-                "  ERROR: Input episode metadata is missing or empty. Cannot process transcripts."
-            )
-            raise ValueError("No episodes to process.")
-
-        processed_records = []  # To store data ready for producing the final DataFrame
-
-        # 2. Iterate through each episode's metadata
-        for index, row in episodes_df.head().iterrows():
-            episode_number = row.get("episode_number")
-            guest_name = row.get("guest_name")
-            transcript_filename = f"ep_{episode_number}.html"
-            transcript_filepath = os.path.join(transcripts_dir, transcript_filename)
-
-            # 3. Confirm file exists and skip if not
-            if not os.path.exists(transcript_filepath):
-                print(
-                    f"  WARNING: Transcript file not found for Episode {episode_number} ({guest_name}) at {transcript_filepath}. Skipping."
-                )
-                continue  # Skip to the next episode
-            # 4. cleaning and timestamp collation
-            try:
-                clean_transcript_str = _clean_transcript_str_from_html(
-                    transcript_filepath
-                )
-                timestamps = _extract_timestamps_as_list_of_dicts(
-                    clean_transcript_str, episode_number
-                )
-                # 5. Adding to processed records
-                processed_records.append(
-                    {
-                        "episode_number": episode_number,
-                        "guest_name": guest_name,
-                        "clean_transcript_text": clean_transcript_str,
-                        "periodic_timestamps": timestamps,  # This will be a list of dictionaries
-                    }
-                )
-                print(
-                    f"  Processed Episode {episode_number} ({guest_name}): Extracted text and {len(timestamps)} timestamps."
-                )
-
-            except Exception as e:
-                print(
-                    f"  ERROR: Failed to process transcript for Episode {episode_number} ({guest_name}) from {transcript_filepath}: {e}"
-                )
-                continue  # For MVP, just skip and warn
-        if processed_records:
-            result_df = pd.DataFrame(processed_records)
-            result_df.to_parquet(output_filepath, index=False)
-            print(
-                f"Successfully saved clean transcripts and timestamps for {len(result_df)} episodes to {output_filepath}"
-            )
-        else:
-            print(
-                "No transcripts were successfully processed. Output DataFrame will be empty."
-            )
-            pd.DataFrame().to_parquet(output_filepath, index=False)  # Save an empty DF
-
-    # Testing:
-    full_episodes_metadata_path = os.path.join(
-        test_temp_dir, "ep_meta_and_mentions.parquet"
-    )
-    transcripts_dir = test_temp_dir
-    output_filepath = os.path.join(
-        test_temp_dir, "test_clean_text_and__timestamps_df.parquet"
-    )
-
-    test_extract_clean_text_and_periodic_timestamps(
-        full_episodes_metadata_path, transcripts_dir, output_filepath
-    )
+    print("\n=== Testing clean transcript, timestamp production and saving ===")
+    test_five_full_data_and_transcripts_timestamps_path = os.path.join(
+        test_temp_dir, "test_five_full_data_and_transcripts_timestamps_slug_ver_df.parquet")
+    
+    try:
+        extract_save_clean_text_and_periodic_timestamps(combined_df_head_filepath, transcripts_dir, test_five_full_data_and_transcripts_timestamps_path)
+        print(f"\nSuccessfully extracted clean text and timestamps, here's dataframe which was saved")
+        print(try_read_parquet(test_five_full_data_and_transcripts_timestamps_path))
+    except Exception as e:
+        print(f"\nError with extracting clean text and timestamps from combined metadata mentions df: {e}")
+    
 
     # -------------------------------------------------------------------------
     # Fuzzywuzzy easy wins and timestamp matching
     # -------------------------------------------------------------------------
 
     # --- Read test dataframes, merge for ease of processing ---
-
-    first_five_transcripts_timestamps_path = os.path.join(
-        test_temp_dir, "test_clean_text_and__timestamps_df.parquet"
-    )
-    meta_head_filepath = os.path.join(
-        test_temp_dir, "ep_meta_and_mentions_head.parquet"
-    )
-    combined_test_df = combine_timestamps_and_metadata(
-        first_five_transcripts_timestamps_path, meta_head_filepath
-    )
+    combined_test_df = try_read_parquet(test_five_full_data_and_transcripts_timestamps_path)
 
     # --- Run top matches on the test data ---
-    print()
     top_mentions_df = find_top_match_and_timestamps(combined_test_df, 90)
 
     # --- Convert list into dataframe, print output ---
 
     print(f"\n--- TOP COLLECTED ---")
     print(f"Top Mentions DataFrame created with {len(top_mentions_df)} rows.")
-    print(top_mentions_df)
+
+    # --- TEMPORARILY CHANGE PANDAS DISPLAY SETTINGS ---
+    # Set the maximum column width to a high number (or 0 for unlimited)
+    pd.set_option('display.max_colwidth', None) 
+    # Set max rows to ensure all head rows are displayed
+    pd.set_option('display.max_rows', 500) 
+
+    # Now print the full content
+    print(top_mentions_df[['Episode ID', 'Restaurant', 'Mention text', 'Timestamp']].head(10)) 
+
+    pd.reset_option('display.max_colwidth')
+    pd.reset_option('display.max_rows')

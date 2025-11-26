@@ -10,10 +10,20 @@ from bs4 import BeautifulSoup
 import requests
 import time
 import random
+import logging
+from pathlib import Path
+import re
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Optional
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 
-from .config import episodes_list_url, restaurants_url
+from .config import episodes_list_url, restaurants_url, transcript_base_url
 
 from .utils import save_text_to_file, extract_html, try_read_parquet
+
+logger = logging.getLogger("scraper")
 
 # =========================================================================
 # 2. Configuration (paths, constants, etc.)
@@ -28,57 +38,300 @@ processed_data_path = os.path.join(project_root, "data/processed")
 # 3. Helper Functions
 # =========================================================================
 
-
-def _save_transcripts_html(eps_dataframe, directory):
+# Function to set up logger for new web scraper
+def configure_logger(log_file: Optional[str] = None, level: int = logging.DEBUG):
     """
-    Iterates through a DataFrame of episodes, downloads the HTML content from
-    the episode URL, and saves it to a specified directory.
-
-    Skips files that already exist and includes a random delay to be
-    polite to the server.
-
-    Args:
-        eps_dataframe (pd.DataFrame): DataFrame containing episode metadata
-                                      (including 'episode_number' and 'url').
-        directory (str): The directory to save the HTML files to.
+    Configure a compact logger for the scraper.
+    - Console handler always enabled.
+    - Optional file handler if log_file provided.
+    - Default level: DEBUG for maximum visibility while testing.
     """
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+    logger = logging.getLogger("scraper")
+    logger.setLevel(level)
 
-    for index, row in eps_dataframe.iterrows():
-        episode_num = row["episode_number"]
-        episode_url = row["url"]
-        filename = f"ep_{episode_num}.html"
-        filepath = os.path.join(directory, filename)
+    # Avoid adding handlers multiple times when running multiple times in a notebook
+    if logger.hasHandlers():
+        logger.handlers.clear()
 
-        # Skip episodes that already exist
-        if os.path.exists(filepath):
-            print(
-                f"  Skipping Episode {episode_num}: File already exists at {filepath}"
-            )
-            continue
+    # Console handler (clear, one-line format)
+    ch = logging.StreamHandler()
+    ch.setLevel(level)
+    ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+    logger.addHandler(ch)
 
-        # Delay to be polite to the server and avoid 429 errors
-        sleep_time = random.uniform(1, 3)  # Sleep for 1 to 3 seconds
-        time.sleep(sleep_time)
+    # Optional file handler (rotating not necessary here — keep simple)
+    if log_file:
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setLevel(level)
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+        logger.addHandler(fh)
 
-        html_content_str = extract_html(episode_url)
+    return logger
 
-        # Check for None before attempting to save
-        # The extract_html function returns None on failure (like a 429 error)
-        if html_content_str:
-            save_text_to_file(html_content_str, filename, directory)
-        else:
-            print(
-                f"  Skipping save for Episode {episode_num} due to failed extraction."
-            )
+# small sanitize helper (same as before)
+def _sanitize_key(key: str) -> str:
+    if not isinstance(key, str):
+        key = str(key)
+    s = key.strip().lower()
+    s = re.sub(r"[^a-z0-9\-_]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-_")
+
+# ---- Helper: random-ish UA list (small) ----
+_SIMPLE_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    "Mozilla/5.0 (X11; Linux x86_64)",
+]
+
+def _choose_headers():
+    return {"User-Agent": random.choice(_SIMPLE_USER_AGENTS)}
+
+# ----- Helper to access retry limits from the server (for use in scraper)
+def _parse_retry_after(header_value: Optional[str]) -> Optional[float]:
+    """
+    Parse Retry-After header. It can be:
+      - an integer number of seconds, e.g. "120"
+      - a HTTP-date string, e.g. "Wed, 21 Oct 2015 07:28:00 GMT"
+    Return number of seconds to wait (float), or None if not parseable.
+    """
+    if not header_value:
+        return None
+    header_value = header_value.strip()
+    # try integer seconds
+    if header_value.isdigit():
+        try:
+            return float(header_value)
+        except Exception:
+            return None
+    # try HTTP-date
+    try:
+        dt = parsedate_to_datetime(header_value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta = (dt - now).total_seconds()
+        return max(0.0, float(delta))
+    except Exception:
+        return None
+
+# Function to download (scrape) the transcripts, replaces _save_transcripts_html
+
+def download_transcripts(
+    url_map: Dict[str, str],
+    out_dir: str,
+    status_path: str,
+    max_attempts_per_url: int = 5,
+    backoff_base: float = 1.0,
+    max_workers: int = 3,
+    session: Optional[requests.Session] = None,
+    timeout: float = 12.0,
+) -> Dict[str, Dict]:
+    """
+    Download URLs to out_dir using url_map (keys are slugs used as filenames).
+    Added logging provides visibility into what the function does on each run.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    status_path = Path(status_path)
+
+    logger.info("Starting download_transcripts: %d urls, out_dir=%s, status_path=%s",
+                len(url_map), out_dir, status_path)
+
+    # Load existing status if present (allows resume)
+    if status_path.exists():
+        try:
+            with open(status_path, "r", encoding="utf-8") as f:
+                status = json.load(f)
+            logger.debug("Loaded existing status.json with %d entries", len(status))
+        except Exception as e:
+            logger.warning("Failed to load status.json (%s). Starting with empty status.", e)
+            status = {}
+    else:
+        logger.debug("No status.json file found at %s. Starting fresh.", status_path)
+        status = {}
+
+    # Initialize status entries for any missing keys (log each new init)
+    for key, url in url_map.items():
+        if key not in status:
+            status[key] = {
+                "url": url,
+                "attempts": 0,
+                "status": "pending",  # pending | success | failed
+                "saved_path": None,
+                "last_error": None,
+            }
+            logger.debug("Initialized status for key='%s' -> %s", key, url)
+
+    # Use a single session for pooling
+    session = session or requests.Session()
+
+    def _attempt_download(key: str, meta: Dict) -> Dict:
+        url = meta["url"]
+        attempts = meta["attempts"]
+        result = dict(meta)
+
+        # If already succeeded, skip and log reason
+        if meta.get("status") == "success":
+            logger.debug("Skipping key='%s' (already success, saved_path=%s)", key, meta.get("saved_path"))
+            return result
+
+        # If max attempts reached, log and skip
+        if attempts >= max_attempts_per_url:
+            result["status"] = "failed"
+            result["last_error"] = "max_attempts_reached"
+            logger.info("Key='%s' reached max attempts (%d). Marking failed.", key, attempts)
+            return result
+
+        # Log the attempt about to be made
+        logger.debug("Attempting key='%s' (attempt %d) -> %s", key, attempts + 1, url)
+        try:
+            headers = _choose_headers()
+            resp = session.get(url, headers=headers, timeout=timeout)
+
+            # If success (200)
+            if resp.status_code == 200:
+                safe_key = _sanitize_key(key)
+                filename = f"{safe_key}.html"
+                saved_path = str(out_dir / filename)
+
+                # If file already exists, log that we're overwriting (helps debug)
+                if Path(saved_path).exists():
+                    logger.debug("File %s already exists and will be overwritten by key='%s'", saved_path, key)
+
+                with open(saved_path, "w", encoding="utf-8") as fh:
+                    fh.write(resp.text)
+
+                result.update({
+                    "attempts": attempts + 1,
+                    "status": "success",
+                    "saved_path": saved_path,
+                    "last_error": None,
+                })
+                logger.info("Saved %s -> %s (key=%s)", url, saved_path, key)
+                return result
+
+            # Retryable status codes
+            if resp.status_code in (429, 500, 502, 503, 504):
+                # Parse Retry-After header if present and include in result
+                retry_after_raw = resp.headers.get("Retry-After")
+                retry_after_seconds = _parse_retry_after(retry_after_raw)
+                result.update({
+                    "attempts": attempts + 1,
+                    "status": "pending",
+                    "last_error": f"status_{resp.status_code}",
+                    "retry_after_seconds": retry_after_seconds,
+                })
+                logger.warning("Retryable HTTP %s for key='%s' url=%s (attempt %s)",
+                               resp.status_code, key, url, attempts + 1)
+                # Log headers optionally for 429 to see Retry-After
+                if resp.status_code == 429:
+                    logger.debug("429 response headers for key='%s': Retry-After=%s", key, retry_after_raw)
+                    logger.debug("Parsed Retry-After seconds for key='%s': %s", key, retry_after_seconds)
+                return result
+
+            # Non-retryable
+            result.update({
+                "attempts": attempts + 1,
+                "status": "failed",
+                "last_error": f"status_{resp.status_code}"
+            })
+            logger.error("Non-retryable HTTP %s for key='%s' url=%s", resp.status_code, key, url)
+            return result
+
+        except requests.RequestException as e:
+            # Network error: retryable
+            result.update({
+                "attempts": attempts + 1,
+                "status": "pending",
+                "last_error": repr(e)
+            })
+            logger.warning("RequestException for key='%s' url=%s (attempt %s): %s", key, url, attempts + 1, e)
+            return result
+
+    # Worker wrapper with backoff
+    def _worker_task(key):
+        meta = status[key]
+        if meta.get("status") == "success" or meta.get("attempts", 0) >= max_attempts_per_url:
+            return key, meta
+
+        new_meta = _attempt_download(key, meta)
+
+        if new_meta["status"] == "pending":
+            # computed exponential backoff (what we would do)
+            comp_sleep = backoff_base * (2 ** (new_meta["attempts"] - 1))
+            jitter = random.uniform(0, 1.0)
+            computed_sleep = comp_sleep + jitter
+
+            # server-provided advice (if any)
+            retry_after = new_meta.get("retry_after_seconds")
+            if retry_after is not None:
+                # use the server's suggestion if it's longer than our computed wait
+                sleep_time = max(computed_sleep, float(retry_after))
+            else:
+                sleep_time = computed_sleep
+
+            # cap to avoid runaway sleeps (adjust cap as desired)
+            sleep_time = min(sleep_time, 600.0)
+
+            logger.info("Backing off %0.2fs for key='%s' (attempt %s) [computed=%0.2fs, server=%s]",
+                        sleep_time, key, new_meta["attempts"], computed_sleep, retry_after)
+            time.sleep(sleep_time)
+
+        return key, new_meta
+
+    # Main loop
+    pending_keys = [k for k, v in status.items() if v["status"] != "success" and v["attempts"] < max_attempts_per_url]
+    round_idx = 0
+    while pending_keys:
+        round_idx += 1
+        logger.info("Download round %d: %d pending", round_idx, len(pending_keys))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_worker_task, key): key for key in pending_keys}
+            for fut in as_completed(futures):
+                key = futures[fut]
+                try:
+                    k, new_meta = fut.result()
+                    status[k].update(new_meta)
+                except Exception as e:
+                    logger.exception("Unhandled exception for key %s: %s", key, e)
+                    status[key]["attempts"] = status[key].get("attempts", 0) + 1
+                    status[key]["last_error"] = repr(e)
+
+        # persist status to disk after every round
+        try:
+            with open(status_path, "w", encoding="utf-8") as f:
+                json.dump(status, f, indent=2)
+            logger.debug("Persisted status.json (round %d).", round_idx)
+        except Exception as e:
+            logger.exception("Failed to write status file: %s", e)
+
+        # Prepare next round
+        pending_keys = [k for k, v in status.items() if v["status"] != "success" and v["attempts"] < max_attempts_per_url]
+
+        if pending_keys:
+            logger.info("Sleeping 2s between rounds to be polite...")
+            time.sleep(2)
+
+    # final persist and summary
+    with open(status_path, "w", encoding="utf-8") as f:
+        json.dump(status, f, indent=2)
+
+    # Final summary counts
+    succ = sum(1 for v in status.values() if v.get("status") == "success")
+    failed = sum(1 for v in status.values() if v.get("status") == "failed")
+    pending = sum(1 for v in status.values() if v.get("status") == "pending")
+    logger.info("Download finished. success=%d failed=%d pending=%d", succ, failed, pending)
+
+    return status
 
 
 # =========================================================================
 # 4. Main Logic Functions
 # =========================================================================
 
-
+# Function to extract html (for episodes site and restaurants site)
 def extract_and_save_html(site_url, output_html_filepath):
     """
     Downloads HTML content from a given URL and saves it to a file.
@@ -95,21 +348,63 @@ def extract_and_save_html(site_url, output_html_filepath):
             os.makedirs(directory)
         save_text_to_file(html_content, filename, directory)
 
-
-def extract_and_save_transcripts_html(
-    input_dataframe_filepath: str, output_html_directory: str
-) -> None:
+# Orchestration function for the scraper, to scrape transcripts
+# Replaces extract_and_save_transcripts_html
+def orchestrate_scraper(
+    df,                     # DataFrame with 'slug' and optionally 'url'
+    base_url,               # base URL for constructing URLs if df has no 'url' column
+    out_dir,                # folder to save HTML transcripts
+    max_attempts_per_url=5,
+    backoff_base=1.0,
+    max_workers=3,
+    timeout=12.0
+):
     """
-    Loads episode metadata and uses it to download and save transcript HTML files.
-
-    Args:
-        input_dataframe_filepath (str): The path to the parquet file containing
-                                        episode metadata.
-        output_html_directory (str): The directory where the transcript
-                                     HTML files will be saved.
+    Orchestrates the scraping process:
+      1. Prepares a slug → URL map
+      2. Ensures output folder exists
+      3. Calls download_transcripts() with sensible defaults
+      4. Returns the status dict for all downloads
     """
-    ep_meta_and_mentions_df = try_read_parquet(input_dataframe_filepath)
-    _save_transcripts_html(ep_meta_and_mentions_df, output_html_directory)
+    # ---------------------
+    # Setup logger for this run
+    # ---------------------
+    logger = configure_logger()
+    logger.info("Starting scraper orchestration for %d episodes", len(df))
+
+    # ---------------------
+    # Prepare URL map
+    # ---------------------
+    if "url" in df.columns:
+        url_map = {row["slug"]: row["url"] for _, row in df.iterrows()}
+        logger.info("Using existing URLs from DataFrame")
+    else:
+        url_map = {row["slug"]: base_url.rstrip("/") + "/" + row["slug"].lstrip("/") for _, row in df.iterrows()}
+        logger.info("Constructed URLs from base_url and slugs")
+
+    # ---------------------
+    # Ensure output folder exists
+    # ---------------------
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    status_path = out_dir / "status.json"
+
+    # ---------------------
+    # Call the scraper
+    # ---------------------
+    logger.info("Running download_transcripts with %d URLs", len(url_map))
+    status = download_transcripts(
+        url_map=url_map,
+        out_dir=out_dir,
+        status_path=status_path,
+        max_attempts_per_url=max_attempts_per_url,
+        backoff_base=backoff_base,
+        max_workers=max_workers,
+        timeout=timeout
+    )
+
+    logger.info("Scraper orchestration finished")
+    return status
 
 
 # =========================================================================
@@ -140,13 +435,14 @@ if __name__ == "__main__":
     # Note - we use dummy data here both to avoid having to depend on data processing, and bc purpose of testing
 
     # Opening dummy data (head of full dataframe) and testing extraction
+    V2_tests_dir = os.path.join(test_temp_dir, "V2_tests")
     ep_meta_and_mentions_head_path = os.path.join(
-        test_temp_dir, "ep_meta_and_mentions_head.parquet"
+        V2_tests_dir, "second_ten_test_episodes_full_metadata.parquet"
     )
     try:
         ep_meta_and_mentions_head_df = pd.read_parquet(ep_meta_and_mentions_head_path)
         # Testing on dummy data
-        _save_transcripts_html(ep_meta_and_mentions_head_df, test_temp_dir)
+        orchestrate_scraper(ep_meta_and_mentions_head_df, transcript_base_url, test_temp_dir)
     except FileNotFoundError:
         print(
             f"Error: The file was not found at {ep_meta_and_mentions_head_path}. Did it save correctly?"
