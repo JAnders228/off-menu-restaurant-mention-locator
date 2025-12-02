@@ -15,9 +15,10 @@ from pathlib import Path
 import re
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Optional
+from typing import Tuple, Dict, Optional
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
+import shutil
 
 from .config import episodes_list_url, restaurants_url, transcript_base_url
 
@@ -115,9 +116,143 @@ def _parse_retry_after(header_value: Optional[str]) -> Optional[float]:
     except Exception:
         return None
 
-# Function to download (scrape) the transcripts, replaces _save_transcripts_html
+# Helper function to assimilate old legacy transcripts (find them, update status.json, rename them to new system)
 
-def download_transcripts(
+def assimilate_existing_transcripts(
+    out_dir: Path,
+    url_map: Dict[str, str],
+    status: Dict[str, Dict],
+    legacy_dir: Optional[Path] = None,
+    rename_to_slug: bool = True,
+    overwrite: bool = False,
+) -> Dict[str, Dict]:
+    """
+    Find legacy files named like 'ep_1.html' or 'ep-1.html' in out_dir (and optionally legacy_dir),
+    map them to url_map keys (slugs that contain 'ep-<num>' or '<num>'), update the status dict and
+    optionally rename/move them to the slug-based filename.
+
+    Args:
+        out_dir: Path where new slug files should live.
+        url_map: mapping slug -> url (used to find matching slug for an ep number).
+        status: status dict to update in-place (returned for convenience).
+        legacy_dir: optional extra directory to check for files (if your old files live elsewhere).
+        rename_to_slug: if True, move/rename legacy file to new slug filename (safe move).
+        overwrite: if True, allow overwriting existing slug files (be careful).
+
+    Returns:
+        Updated status dict (mutated in-place).
+    """
+    out_dir = Path(out_dir)
+    candidates = []
+
+    _LEGACY_EP_RE = re.compile(r"ep[_\-]?(\d+)\.html$", flags=re.IGNORECASE)
+    # collect files to examine from out_dir
+    for p in out_dir.glob("*.html"):
+        candidates.append(p)
+
+    # also check legacy_dir if provided
+    if legacy_dir:
+        legacy_dir = Path(legacy_dir)
+        if legacy_dir.exists():
+            for p in legacy_dir.glob("*.html"):
+                # avoid double-adding files that are already in out_dir (same path)
+                if p.resolve() not in [c.resolve() for c in candidates]:
+                    candidates.append(p)
+
+    # build reverse map: number_str -> list of slugs that contain that number token
+    # e.g. '1' -> ['ep-1-john-doe', 'ep-1-other']
+    num_to_slugs = {}
+    for slug in url_map.keys():
+        # find first number token like ep-<num> or ep<num>
+        m = re.search(r"ep[-_]?(?P<num>\d+)", slug, flags=re.IGNORECASE)
+        if m:
+            num = m.group("num")
+            num_to_slugs.setdefault(num, []).append(slug)
+        else:
+            # also consider bare numbers anywhere (e.g. 'episode-23-guest')
+            m2 = re.search(r"(?<!\d)(\d+)(?!\d)", slug)
+            if m2:
+                num = m2.group(1)
+                num_to_slugs.setdefault(num, []).append(slug)
+
+    summary = {"found": 0, "mapped": 0, "renamed": 0, "skipped": 0}
+
+    for p in candidates:
+        name = p.name
+        m = _LEGACY_EP_RE.match(name)
+        if not m:
+            # not a legacy ep_N file; ignore
+            continue
+        summary["found"] += 1
+        epnum = m.group(1)
+
+        # find candidate slugs for this ep number
+        candidates_for_num = num_to_slugs.get(epnum, [])
+
+        if not candidates_for_num:
+            # no matching slug for the number — skip for now
+            logger.debug("Found legacy file %s but no slug contains ep-%s; skipping", name, epnum)
+            summary["skipped"] += 1
+            continue
+
+        # If multiple slugs match one number, prefer exact 'ep-<num>' prefix match
+        chosen_slug = None
+        for s in candidates_for_num:
+            if re.match(fr"^ep[-_]?{epnum}(\b|-|$)", s, flags=re.IGNORECASE):
+                chosen_slug = s
+                break
+        if chosen_slug is None:
+            chosen_slug = candidates_for_num[0]
+
+        # Build destination path for slug file
+        safe_slug = _sanitize_key(chosen_slug)
+        dest = out_dir / f"{safe_slug}.html"
+
+        # If dest already exists and is same file, just update status
+        try:
+            if dest.exists() and dest.resolve() == p.resolve():
+                logger.debug("Legacy file %s already at desired location %s", p, dest)
+            elif dest.exists() and not overwrite:
+                # dest already exists (someone downloaded or moved it earlier) -> skip rename but update status to point to dest
+                logger.info("Destination %s exists; skipping move of %s (overwrite=False)", dest, p)
+                summary["skipped"] += 1
+            else:
+                if rename_to_slug:
+                    # move (or copy+unlink) legacy file to dest in a safe manner
+                    logger.info("Renaming/moving legacy file %s -> %s", p, dest)
+                    # ensure parent exists
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    # use shutil.move to preserve contents; if same filesystem this is cheap
+                    shutil.move(str(p), str(dest))
+                    summary["renamed"] += 1
+                else:
+                    # don't move but use p as saved_path
+                    dest = p
+        except Exception as e:
+            logger.exception("Failed to move/inspect legacy file %s: %s", p, e)
+            summary["skipped"] += 1
+            continue
+
+        # Update status entry for chosen slug
+        meta = status.setdefault(chosen_slug, {"url": url_map.get(chosen_slug), "attempts": 0, "status": "pending", "saved_path": None, "last_error": None})
+        meta.update({
+            "attempts": max(meta.get("attempts", 0), 1),
+            "status": "success",
+            "saved_path": str(dest),
+            "last_error": None,
+        })
+        logger.info("Associated legacy file %s -> slug=%s saved_path=%s", name, chosen_slug, dest)
+        summary["mapped"] += 1
+
+    logger.info("Assimilation summary: %s", summary)
+    return status
+
+
+# Function to download (scrape) the transcripts, legacy compatible version
+# checks a directory (see legacy_dir = ... in the function) for old style transcripts
+# and updates the status.json accordingly, and renames the files, then skips them as they're already downloaded
+# replaces download transcripts which replaced _save_transcripts_html
+def download_transcripts_legacy(
     url_map: Dict[str, str],
     out_dir: str,
     status_path: str,
@@ -126,6 +261,7 @@ def download_transcripts(
     max_workers: int = 3,
     session: Optional[requests.Session] = None,
     timeout: float = 12.0,
+    legacy_dir = None
 ) -> Dict[str, Dict]:
     """
     Download URLs to out_dir using url_map (keys are slugs used as filenames).
@@ -162,6 +298,14 @@ def download_transcripts(
                 "last_error": None,
             }
             logger.debug("Initialized status for key='%s' -> %s", key, url)
+
+    # try assimilating legacy files in out_dir and a legacy folder (if you have one)
+    if legacy_dir:
+        status = assimilate_existing_transcripts(out_dir=out_dir, url_map=url_map, status=status, legacy_dir=legacy_dir, rename_to_slug=True, overwrite=False)
+        # persist immediately so the status file reflects these existing files
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump(status, f, indent=2)
+        logger.debug("Persisted status.json after assimilating legacy transcripts.")
 
     # Use a single session for pooling
     session = session or requests.Session()
@@ -349,15 +493,17 @@ def extract_and_save_html(site_url, output_html_filepath):
         save_text_to_file(html_content, filename, directory)
 
 # Orchestration function for the scraper, to scrape transcripts
-# Replaces extract_and_save_transcripts_html
-def orchestrate_scraper(
+# Legacy compatible version (main edits in download_transcripts_legacy) to check for old style trasncripts and update filenames
+# replaces orchestrate_scraper which replaced extract_and_save_transcripts_html
+def orchestrate_scraper_legacy(
     df,                     # DataFrame with 'slug' and optionally 'url'
     base_url,               # base URL for constructing URLs if df has no 'url' column
     out_dir,                # folder to save HTML transcripts
     max_attempts_per_url=5,
     backoff_base=1.0,
     max_workers=3,
-    timeout=12.0
+    timeout=12.0,
+    legacy_dir = None
 ):
     """
     Orchestrates the scraping process:
@@ -365,6 +511,15 @@ def orchestrate_scraper(
       2. Ensures output folder exists
       3. Calls download_transcripts() with sensible defaults
       4. Returns the status dict for all downloads
+
+    Args:
+        df: dataframe (not filepath) with slugs and urls in (also raw titles, guest names)
+        base_url: The base url for the transcripts from podscripts.com
+        out_dir: The folder to save the transcripts to
+        max_attempts_per_url
+        backoff_base
+        max_workers
+        timeout
     """
     # ---------------------
     # Setup logger for this run
@@ -393,14 +548,15 @@ def orchestrate_scraper(
     # Call the scraper
     # ---------------------
     logger.info("Running download_transcripts with %d URLs", len(url_map))
-    status = download_transcripts(
+    status = download_transcripts_legacy(
         url_map=url_map,
         out_dir=out_dir,
         status_path=status_path,
         max_attempts_per_url=max_attempts_per_url,
         backoff_base=backoff_base,
         max_workers=max_workers,
-        timeout=timeout
+        timeout=timeout,
+        legacy_dir=legacy_dir
     )
 
     logger.info("Scraper orchestration finished")
@@ -442,7 +598,7 @@ if __name__ == "__main__":
     try:
         ep_meta_and_mentions_head_df = pd.read_parquet(ep_meta_and_mentions_head_path)
         # Testing on dummy data
-        orchestrate_scraper(ep_meta_and_mentions_head_df, transcript_base_url, test_temp_dir)
+        orchestrate_scraper_legacy(ep_meta_and_mentions_head_df, transcript_base_url, test_temp_dir)
     except FileNotFoundError:
         print(
             f"Error: The file was not found at {ep_meta_and_mentions_head_path}. Did it save correctly?"

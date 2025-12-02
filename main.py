@@ -3,24 +3,27 @@
 import os
 import sys
 import pandas as pd
+import traceback
 
 # --- 1. Import Pipeline Functions ---
 from off_menu.data_extraction import (
     extract_and_save_html,
-    extract_and_save_transcripts_html,
+    orchestrate_scraper_legacy # replaces extract_and_save_transcripts_html,
 )
 from off_menu.data_processing import (
-    create_numbers_names_dict_from_html,
-    create_numbers_names_df_from_dict,
-    create_urls_and_save_to_numbers_names_df,
+    create_tuple_inc_ep_slugs_guests_list_from_html, # replace create_numbers_names_dict_from_html
+    create_slugs_guests_df_from_list_of_dict, # replaces create_numbers_names_df_from_dict
+    create_urls_and_save_to_slugs_guests_df, # replaces create_urls_and_save_to_numbers_names_df
     create_mentions_by_res_name_dict,
     create_return_exploded_res_mentions_df,
-    combine_save_mentions_ep_metadata_dfs,
-    extract_clean_text_and_periodic_timestamps,
+    combine_save_mentions_and_ep_metadata_dfs,
+    extract_save_clean_text_and_periodic_timestamps, #replaces extract_clean_text_and_periodic_timestamps
     combine_timestamps_and_metadata,
     find_top_match_and_timestamps,
+    get_unprocessed_episodes
+    
 )
-from off_menu.utils import try_read_parquet
+from off_menu.utils import try_read_parquet, try_read_html_string_from_filepath
 
 # --- 2. Define Your Paths and Parameters (Hardcoded for speed, refine later) ---
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -72,24 +75,28 @@ def main():
             "\n--- STAGE 2: Processing Episode Metadata & Generating Transcript URLs ---"
         )
         processed_metadata_filepath_for_saving = os.path.join(
-            PROCESSED_DATA_DIR, "num_name_url_df.parquet"
+            PROCESSED_DATA_DIR, "slugs_names_urls_df.parquet"
         )
 
-        # Step 2.1 Create numbers and names dictionary from html
+        # Step 2.1 Create tuple containing two lists
+        # The first list is a list of dicts of raw titles, slugs and guest names
+        # Which will be used for onwards processing into a full metadata dataframe
+        # The second is exceptions (e.g. best of) which will not be included 
 
-        numbers_names_dict = create_numbers_names_dict_from_html(episodes_html_filepath)
+        episodes_html_str = try_read_html_string_from_filepath(episodes_html_filepath)
 
-        # Step 2.2 Create numbers and names dataframe from numbers and names dictionary
+        title_slugs_guestnames_list = create_tuple_inc_ep_slugs_guests_list_from_html(episodes_html_str)[0]
 
-        numbers_names_df = create_numbers_names_df_from_dict(numbers_names_dict)
+        # Step 2.2 Create titles, slugs, guest names dataframe from list of dicts of raw titles, slugs and guest names
+        title_slugs_guestnames_df = create_slugs_guests_df_from_list_of_dict(title_slugs_guestnames_list)
 
         # Step 2.3 Create URL's and add to the datframe, save dataframe
 
-        num_name_url_df = create_urls_and_save_to_numbers_names_df(
-            numbers_names_df, processed_metadata_filepath_for_saving
+        create_urls_and_save_to_slugs_guests_df(
+            title_slugs_guestnames_df, processed_metadata_filepath_for_saving
         )
-
-        print("STAGE 2 Complete: numbers, names, urls dataframe saved.")
+        titles_slugs_guestnames_urls_df = try_read_parquet(processed_metadata_filepath_for_saving)
+        print("STAGE 2 Complete: raw titles, slugs, guestnames, urls dataframe saved.")
 
         # =====================================================================
         # STAGE 3: Dependent Extraction (Download Full HTML Transcripts)
@@ -97,20 +104,29 @@ def main():
         # =====================================================================
         print("\n--- STAGE 3: Downloading Full HTML Transcripts ---")
 
+        # Consider adding function to check for old style transcripts and update status accordingly
+
         raw_transcripts_output_dir = os.path.join(RAW_DATA_DIR, "transcripts_htmls")
-        extract_and_save_transcripts_html(
-            processed_metadata_filepath_for_saving, raw_transcripts_output_dir
+        
+        orchestrate_scraper_legacy(
+            df = titles_slugs_guestnames_urls_df, 
+            base_url=transcript_base_url, 
+            out_dir = raw_transcripts_output_dir,
+            max_attempts_per_url= 5, 
+            backoff_base= 1,
+            max_workers= 3,
+            legacy_dir=raw_transcripts_output_dir
         )
 
-        print("STAGE 3 Complete: Full HTML transcripts downloaded.")
+        print("STAGE 3 Complete: HTML transcripts attemped, see logger above for success rate")
 
         # =====================================================================
         # STAGE 4: Processing restaurant mentions (which episodes mention which, if any, restaurants)
         # Goal: Process the downloaded raw HTML from the restaurants site, and combine with numbers, names, url df
         # =====================================================================
         print("\n--- STAGE 4: Processing restaurant mentions from restaurants HTML ---")
-        full_episodes_data_path = os.path.join(
-            ANALYTICS_DATA_DIR, "full_episodes_data_df.parquet"
+        episodes_metadata_and_mentions_path = os.path.join(
+            ANALYTICS_DATA_DIR, "episodes_metadata_and_mentions_df.parquet"
         )
 
         # Step 4.1 Create dict of mentions with res name as keys and list of guests who mention as values
@@ -122,28 +138,42 @@ def main():
             guests_who_mention_res_by_res_name_dict
         )
         # Step 4.3 Combine with numbers, names, url dataframe and save
-        combine_save_mentions_ep_metadata_dfs(
+        combine_save_mentions_and_ep_metadata_dfs(
             exploded_res_mentions_df,
             processed_metadata_filepath_for_saving,
-            full_episodes_data_path,
+            episodes_metadata_and_mentions_path,
         )
-
+        print("Episodes metadata and mentions df:")
+        print(try_read_parquet(episodes_metadata_and_mentions_path).head())
         print(
-            "STAGE 4 Complete: Restaurant mentions merged with metadata to produce full_episode_data_df"
+            "STAGE 4 Complete: Restaurant mentions merged with metadata to produce episodes_metadata_and_mentions_df"
         )
         # =====================================================================
         # STAGE 5: Collate clean transcript strings and timestamps for each episode
         # Goal: Create a dataframe of all the cleaned transcript strings, and timestamps (time, index) for all of the transcripts, by episode number
         # =====================================================================
         print("\n--- STAGE 5: Collating the timestamps for each episode ---")
-        full_episodes_metadata_path = full_episodes_data_path
+
         transcripts_dir = raw_transcripts_output_dir
-        output_filepath = os.path.join(
-            PROCESSED_DATA_DIR, "cleaned_transcript_timestamp_df.parquet"
+
+        timestamps_transcripts_output_filepath = os.path.join(
+            PROCESSED_DATA_DIR, "cleaned_transcripts_timestamps_df.parquet"
         )
 
-        extract_clean_text_and_periodic_timestamps(
-            full_episodes_metadata_path, transcripts_dir, output_filepath
+        # Check for processed episodes
+        episodes_for_timestamping = get_unprocessed_episodes(
+        episodes_metadata_and_mentions_path,
+        timestamps_transcripts_output_filepath 
+        )
+        # Save unprocessed episodes (to be processed) into dataframe
+        episodes_for_timestamping_path = os.path.join(
+            PROCESSED_DATA_DIR, "episodes_for_timestamping_df.parquet"
+        )
+        episodes_for_timestamping.to_parquet(episodes_for_timestamping_path)
+
+        # Extract new timestamps
+        extract_save_clean_text_and_periodic_timestamps(
+            episodes_for_timestamping_path, transcripts_dir, timestamps_transcripts_output_filepath
         )
 
         print("STAGE 5 Complete: Clean transcripts and timestamps collated.")
@@ -155,18 +185,22 @@ def main():
         print("\n--- STAGE 6: Fuzzymatch full restaurant mentions (easy wins) ---")
 
         cleaned_transcript_timestamps_filepath = os.path.join(
-            PROCESSED_DATA_DIR, "cleaned_transcript_timestamp_df.parquet"
+            PROCESSED_DATA_DIR, "cleaned_transcripts_timestamps_df.parquet"
         )
-        full_episodes_metadata_path = full_episodes_data_path
 
-        combined_df = combine_timestamps_and_metadata(
-            cleaned_transcript_timestamps_filepath, full_episodes_metadata_path
-        )
-        easy_win_mention_search_df = find_top_match_and_timestamps(combined_df)
+        # Note: cleaned_transcrtip_timestamps_df has metadata and transcripts/timestamps
+        # So, no need to combine with metadat
+        # Combination function results in two restaurant_mentions columns, restaurants_mentions_x and y
+        # Which then cannot be read by the matching function
+        cleaned_transcript_timestamps_df = try_read_parquet(cleaned_transcript_timestamps_filepath)
+
+        print("attempting easy win mention search")
+        easy_win_mention_search_df = find_top_match_and_timestamps(cleaned_transcript_timestamps_df)
 
         easy_wins_mention_search_path = os.path.join(
             PROCESSED_DATA_DIR, "easy_win_mention_search_df.parquet"
         )
+        print(f"saving easy win mentions to filepath {easy_wins_mention_search_path}")
         easy_win_mention_search_df.to_parquet(
             easy_wins_mention_search_path, index=False
         )
@@ -189,6 +223,7 @@ def main():
     except Exception as e:
         print(f"\n!!! PIPELINE FAILED !!!")
         print(f"Error: {e}")
+        traceback.print_exc()
         print("Please check the error message above and your logs/intermediate files.")
         sys.exit(1)  # Exit with an error code to indicate failure
 

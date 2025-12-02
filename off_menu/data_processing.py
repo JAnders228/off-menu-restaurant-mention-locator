@@ -14,7 +14,7 @@ import unicodedata
 
 from .utils import try_read_html_string_from_filepath, try_read_parquet
 from .config import transcript_base_url
-from .data_extraction import orchestrate_scraper
+from .data_extraction import orchestrate_scraper_legacy
 
 # =========================================================================
 # 2. Configuration (paths, constants, etc.)
@@ -38,7 +38,7 @@ episodes_html_filepath = os.path.join(
 
 # Helper function to create slugs, which will be used as unique ep identifiers now that numbers 
 # are no longer give, and will form the end of URL's
-# Used in create_ep_slugs_and_guests_from_html
+# Used in create_ep_slugs_guests_from_html
 def slugify(text: str) -> str:
     """
     Convert text to a simple dash-separated, lowercase slug.
@@ -55,7 +55,7 @@ def slugify(text: str) -> str:
 
 # Helper function to generate the guests name from the raw ep title, needed to match episodes to restaurant mentions
 # Restaurant mentions are listed by guest name, not ep number or slug
-# Used in create_ep_slugs_and_guests_from_html
+# Used in create_ep_slugs_guests_from_html
 def extract_guest_name(raw_title: str) -> str:
     """
     Extract guest name using the simple rule:
@@ -319,7 +319,6 @@ def _find_timestamp(
 
     return None  # If no timestamp found before the quote's starting position (all eps start "Starting point is 00:00:00")
 
-
 def _matches_by_res_name_from_list_of_res_names(
     restaurant_names: List[str], searchable_sentences: List[str], min_score: int
 ) -> Dict[str, List[Tuple[str, int, int]]]:
@@ -383,7 +382,7 @@ def _matches_by_res_name_from_list_of_res_names(
 # Function to create slugs and guest names from html 
 # Replaces create_numbers_names_dict_from_html
 
-def create_tuple_inc_ep_slugs_and_guests_list_from_html(html_string: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+def create_tuple_inc_ep_slugs_guests_list_from_html(html_string: str) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
     Parse episodes HTML and return a tuple:
       (
@@ -426,12 +425,13 @@ def create_tuple_inc_ep_slugs_and_guests_list_from_html(html_string: str) -> Tup
     return records, exceptions
 
 
-# Function to create slugs and guest names dataframe from the dict made by create_ep_slugs_and_guests_from_html
+# Function to create slugs and guest names dataframe from the dict made by create_ep_slugs_guests_from_html
 # Replaces create_numbers_names_df_from_dict
 
 def create_slugs_guests_df_from_list_of_dict(titles_list: Dict) -> pd.DataFrame:
     """
     Takes the list of dicts of raw titles, slugs and guest names and returns a dataframe
+    with these columns
     """
     df_episodes_metadata = pd.DataFrame(titles_list)
     return df_episodes_metadata
@@ -586,15 +586,16 @@ def extract_save_clean_text_and_periodic_timestamps(
     episodes_df = try_read_parquet(full_episodes_metadata_path)
     if episodes_df is None or episodes_df.empty:
         print(
-            "  ERROR: Input episode metadata is missing or empty. Cannot process transcripts."
+            "INFO: No unprocessed episodes found. Nothing to do. (Either all episodes processed or metadata empty.)"
         )
-        raise ValueError("No episodes to process.")
+        return
 
     processed_records = []  # To store data for the final DataFrame
 
     # 2. Iterate through each episode's metadata
     for index, row in episodes_df.iterrows():
         episode_slug = row.get("slug")
+        # print(f"The slug is: {episode_slug}")
         guest_name = row.get("guest_name")
         transcript_filename = f"{episode_slug}.html"
         transcript_filepath = os.path.join(transcripts_dir, transcript_filename)
@@ -643,6 +644,34 @@ def extract_save_clean_text_and_periodic_timestamps(
             pd.DataFrame().to_parquet(output_filepath, index=False)  # Save an empty DF
 
 
+def get_unprocessed_episodes(full_metadata_path: str,
+                             processed_parquet_path: str) -> pd.DataFrame:
+    """
+    Returns a filtered episodes_df containing only episodes that have NOT
+    already been processed into the output parquet.
+    """
+    episodes_df = try_read_parquet(full_metadata_path)
+    if episodes_df is None or episodes_df.empty:
+        raise ValueError("Episode metadata missing or empty.")
+
+    # If no processed file exists yet → process everything
+    if not os.path.exists(processed_parquet_path):
+        return episodes_df
+
+    processed_df = try_read_parquet(processed_parquet_path)
+    if processed_df is None or processed_df.empty:
+        return episodes_df
+
+    processed_slugs = set(processed_df["slug"].astype(str))
+
+    # Filter metadata
+    unprocessed_df = episodes_df[~episodes_df["slug"].isin(processed_slugs)]
+
+    print(f"Found {len(unprocessed_df)} unprocessed episodes "
+          f"({len(processed_slugs)} already processed).")
+
+    return unprocessed_df
+
 # -------------------------------------------------------------------------
 # Combining episode metadata with transcripts and timestamps
 # -------------------------------------------------------------------------
@@ -674,6 +703,10 @@ def combine_timestamps_and_metadata(
 # -------------------------------------------------------------------------
 # Fuzzymatching and timestamp location for easy wins (top match)
 # -------------------------------------------------------------------------
+# V2 from V2_new_names_sandbox
+# Includes commented out debug statements
+# Unsure why this version worked in testing again (didn't yesterday)
+# Ensuring all helpers have been updated in case this is the issue
 def find_top_match_and_timestamps(
     combined_df: pd.DataFrame, min_match_score: int = 90
 ) -> pd.DataFrame:
@@ -718,6 +751,8 @@ def find_top_match_and_timestamps(
 
         # Unsure what data type the res mentions are, hence need for this
         restaurants_list = []
+        # print(f"The data type of the restaurant matches is{type(restaurants_data)}")
+        # print(f"restaurants data (raw) : {restaurants_data}")
         if isinstance(restaurants_data, list):
             restaurants_list = restaurants_data
         elif isinstance(restaurants_data, np.ndarray) and restaurants_data.size > 0:
@@ -726,6 +761,7 @@ def find_top_match_and_timestamps(
             restaurants_list = [
                 name.strip().lower() for name in restaurants_raw_list if name.strip()
             ]
+            # print(f"\n restauratns list (processed): {restaurants_list}")
         elif isinstance(restaurants_data, str):
             restaurants_list = [
                 name.strip() for name in restaurants_data.split(",") if name.strip()
@@ -819,7 +855,7 @@ if __name__ == "__main__":
             html_text = f.read()
 
         # Create slug -> guest dict
-        slugs_guests_and_exclusions_tuple = create_tuple_inc_ep_slugs_and_guests_list_from_html(html_text)
+        slugs_guests_and_exclusions_tuple = create_tuple_inc_ep_slugs_guests_list_from_html(html_text)
         slugs_guests_dict_list = slugs_guests_and_exclusions_tuple[0]
         print("Sample slugs -> guest mapping:", list(slugs_guests_dict_list[:3]))
 
@@ -917,7 +953,7 @@ if __name__ == "__main__":
     transcripts_dir = os.path.join("data/test_temp", "transcripts_sample")
     output_filepath = os.path.join("data/test_temp", "test_transcripts_data_processing_script.parquet")
 
-    orchestrate_scraper(
+    orchestrate_scraper_legacy(
         df=combined_df_head,  # only a small batch for testing
         base_url= transcript_base_url,
         out_dir=transcripts_dir,
