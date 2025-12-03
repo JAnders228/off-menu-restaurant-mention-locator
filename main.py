@@ -20,7 +20,9 @@ from off_menu.data_processing import (
     extract_save_clean_text_and_periodic_timestamps, #replaces extract_clean_text_and_periodic_timestamps
     combine_timestamps_and_metadata,
     find_top_match_and_timestamps,
-    get_unprocessed_episodes
+    get_unprocessed_episodes,
+    parse_restaurants_using_user_cleaners_v3,
+    exact_merge_restaurants
     
 )
 from off_menu.utils import try_read_parquet, try_read_html_string_from_filepath
@@ -70,6 +72,7 @@ def main():
         # STAGE 2: Preliminary Processing (Generate Full URLs for Transcripts)
         # Goal: Take basic metadata, clean guest names, and generate the exact
         # URLs needed for downloading each transcript's HTML.
+        # Also, generate a dataframe with restaurant mentions data (regions) for use in ordering output
         # =====================================================================
         print(
             "\n--- STAGE 2: Processing Episode Metadata & Generating Transcript URLs ---"
@@ -96,7 +99,19 @@ def main():
             title_slugs_guestnames_df, processed_metadata_filepath_for_saving
         )
         titles_slugs_guestnames_urls_df = try_read_parquet(processed_metadata_filepath_for_saving)
-        print("STAGE 2 Complete: raw titles, slugs, guestnames, urls dataframe saved.")
+
+        # Step 2.4 Create a dataframe of restaurants including guests who mention, and their regions
+
+        restaurants_and_regions_filepath_for_saving = os.path.join(
+            PROCESSED_DATA_DIR, "res_and_regions_df.parquet"
+        )
+        restaurants_html = try_read_html_string_from_filepath(restaurants_html_filepath)
+
+        restaurants_and_regions_df = parse_restaurants_using_user_cleaners_v3(restaurants_html)
+
+        restaurants_and_regions_df.to_parquet(restaurants_and_regions_filepath_for_saving)
+
+        print("STAGE 2 Complete: raw titles, slugs, guestnames, urls dataframe saved. Restaurants and regions dataframe saved")
 
         # =====================================================================
         # STAGE 3: Dependent Extraction (Download Full HTML Transcripts)
@@ -179,11 +194,13 @@ def main():
         print("STAGE 5 Complete: Clean transcripts and timestamps collated.")
 
         # =====================================================================
-        # STAGE 6: First run of fuzzymatching => full restaurant mentions/easy wins (MVP)
+        # STAGE 6: First run of fuzzymatching => full restaurant mentions/easy wins (MVP) => Merged with restaurant regions data for output
         # Goal: Match full names (e.g. 'Paul Bakery') and store quote, index and nearest timestamp in a dataframe, for MVP of easy matches
+        # Goal: Merge this dataframe with restaurants and regions data ready for output
         # =====================================================================
-        print("\n--- STAGE 6: Fuzzymatch full restaurant mentions (easy wins) ---")
+        print("\n--- STAGE 6: Fuzzymatch full restaurant mentions (easy wins) and merge with restaurant regions data ---")
 
+        # Stage 6.1 Fuzzy matching
         cleaned_transcript_timestamps_filepath = os.path.join(
             PROCESSED_DATA_DIR, "cleaned_transcripts_timestamps_df.parquet"
         )
@@ -205,7 +222,22 @@ def main():
             easy_wins_mention_search_path, index=False
         )
 
-        print("STAGE 6 Complete: First run of fuzzymatches complete.")
+        # Stage 6.2 Merging easy wins with retsaurants and regions data
+
+        matched, unmatched, report = exact_merge_restaurants(restaurants_and_regions_df, easy_win_mention_search_df)
+
+        print(f"report: {report}")
+        print(f"\n unmatched df head: {unmatched.head()}")
+        print(f"\n matched df head: {matched.head()}")
+        print(f"\n matched df cols: {matched.columns}")
+
+        print(unmatched[['Restaurant','Episode ID','Mention text']].head(20).to_string())
+
+        top_mentions_with_regions_path = os.path.join(PROCESSED_DATA_DIR, "top_mentions_with_regions.csv")
+
+        matched.to_csv(top_mentions_with_regions_path)
+
+        print("STAGE 6 Complete: First run of fuzzymatches complete. Dataframe merged with restaurant region data")
 
         # =====================================================================
         # STAGE 7: (Optional) Final Output / Analysis
@@ -214,8 +246,8 @@ def main():
         # You might load aggregated_output_path here to do some quick analysis
         easy_win_mention_search_df = try_read_parquet(easy_wins_mention_search_path)
 
-        print("\n--- Head of the easy wins mention search dataframe ---")
-        print(easy_win_mention_search_df.head(10))
+        print("\n--- Head of the matched easy wins mention search dataframe ---")
+        print(matched.head(10))
 
         print("STAGE 7 Complete: Final output reviewed.")
         print("\n--- Pipeline Finished Successfully! ---")

@@ -11,6 +11,7 @@ import numpy as np
 from fuzzywuzzy import process
 from fuzzywuzzy import fuzz
 import unicodedata
+import html
 
 from .utils import try_read_html_string_from_filepath, try_read_parquet
 from .config import transcript_base_url
@@ -31,6 +32,16 @@ episodes_html_filepath = os.path.join(
 # =========================================================================
 # 3. Helper Functions
 # =========================================================================
+
+# -------------------------------------------------------------------------
+# Restaurants processing (inc. region data)
+# -------------------------------------------------------------------------
+def _restaurant_key_from_clean_name(clean_name: str) -> str:
+    if clean_name is None:
+        return ""
+    k = str(clean_name).lower()
+    k = re.sub(r"\s+", " ", k).strip()
+    return k
 
 # -------------------------------------------------------------------------
 # Episodes processing
@@ -140,6 +151,28 @@ def _create_restaurants_by_res_name_dict(html_string: str) -> Dict[str, List[str
         else:
             restaurants_by_res_name[_clean_res(item)[0]] = _clean_res(item)[1]
     return restaurants_by_res_name
+
+
+# Helper for merging restaurants region data with matches
+
+def _normalize_for_match(s: str) -> str:
+    """
+    Simple normalizer for exact matching:
+      - NFKC unicode normalize
+      - lower-case
+      - remove punctuation except ampersand (&)
+      - collapse whitespace
+      - strip
+    """
+    if pd.isna(s):
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKC", s)
+    s = s.lower()
+    # keep letters, numbers, spaces, ampersand
+    s = re.sub(r"[^0-9a-z&\s]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 # -------------------------------------------------------------------------
@@ -371,9 +404,344 @@ def _matches_by_res_name_from_list_of_res_names(
     return filtered_matches_by_string
 
 
+def _expand_context_around_match(
+    transcript: str,
+    match_start: int,
+    match_end: int,
+    target_chars: int = 500
+) -> Tuple[int, int, str]:
+    """
+    Expand a context window around [match_start:match_end] inside transcript,
+    aiming to return approximately target_chars characters (if available).
+    Returns (context_start, context_end, context_str).
+    Ensures we don't cut off mid-word at the ends (trim to whitespace boundaries).
+    """
+    if transcript is None:
+        return 0, 0, ""
+
+    n = len(transcript)
+    # make sure indices are in bounds
+    match_start = max(0, int(match_start))
+    match_end = min(n, int(match_end))
+
+    # if transcript shorter than target, return whole thing
+    if n <= target_chars:
+        return 0, n, transcript
+
+    # Aim to give about half before and half after
+    half = target_chars // 2
+    start_candidate = max(0, match_start - half)
+    end_candidate = min(n, match_end + half)
+
+    # If we hit boundaries, expand the other side
+    avail_left = match_start - start_candidate
+    avail_right = end_candidate - match_end
+    shortfall = target_chars - (avail_left + (match_end - match_start) + avail_right)
+    if shortfall > 0:
+        # extend left if possible, else extend right
+        extra_left = min(start_candidate, shortfall)
+        start_candidate = max(0, start_candidate - extra_left)
+        shortfall -= extra_left
+    # after attempt above, if still short, extend right
+    if shortfall > 0:
+        end_candidate = min(n, end_candidate + shortfall)
+
+    # Trim context to nearest word boundary (avoid cutting words)
+    # Move start forward to next whitespace (if not at 0) and end backward to previous whitespace (if not at n)
+    if start_candidate > 0:
+        # move forward to next whitespace to avoid cutting a word
+        m = re.search(r"\s", transcript[start_candidate:match_start])
+        if m:
+            start_candidate = start_candidate + m.start()
+    if end_candidate < n:
+        # move backward to previous whitespace to avoid cutting a word
+        m = re.search(r"\s(?=[^\s]*$)", transcript[match_end:end_candidate])
+        # the above is tricky; simpler: find last whitespace before end_candidate
+        rev = transcript[match_end:end_candidate]
+        last_space = rev.rfind(" ")
+        if last_space != -1:
+            end_candidate = match_end + last_space
+
+    # safety clamping
+    start_candidate = max(0, int(start_candidate))
+    end_candidate = min(n, int(end_candidate))
+    return start_candidate, end_candidate, transcript[start_candidate:end_candidate]
+
+
+def _create_highlighted_html(context_str: str, match_rel_start: int, match_rel_end: int) -> str:
+    """
+    Escape HTML in context_str, then wrap the slice [match_rel_start:match_rel_end] with <mark>.
+    match_rel_* are indices relative to context_str.
+    Returns the HTML string safe to insert with unsafe_allow_html=True in Streamlit.
+    """
+    if not context_str:
+        return ""
+
+    # Ensure indices within bounds
+    match_rel_start = max(0, int(match_rel_start))
+    match_rel_end = min(len(context_str), int(match_rel_end))
+
+    # Escape full context to avoid accidental HTML injections
+    esc = html.escape(context_str)
+
+    # But escaping shifts indices because certain chars become entities (e.g. '&' -> '&amp;').
+    # To robustly highlight, simpler approach: split the original context into three parts and escape each.
+    before = html.escape(context_str[:match_rel_start])
+    middle = html.escape(context_str[match_rel_start:match_rel_end])
+    after = html.escape(context_str[match_rel_end:])
+
+    # Wrap middle in <mark>
+    return f"{before}<mark>{middle}</mark>{after}"
+
+def _strip_starting_point(transcript: str) -> str:
+    """
+    Remove phrases like 'starting point is 00:00:00' (case-insensitive) from transcript.
+    Accepts hours with 1 or 2 digits and standard MM:SS, and removes optional trailing punctuation and whitespace.
+    """
+    if not isinstance(transcript, str) or not transcript:
+        return transcript or ""
+    # Pattern: starting point is <H>HH:MM:SS  optionally followed by punctuation/spaces
+    pattern = r"starting point is\s*\d{1,2}:\d{2}:\d{2}\s*[.,;:!?-]?\s*"
+    cleaned = re.sub(pattern, "", transcript, flags=re.IGNORECASE)
+    # Run twice to remove repeated occurrences (idempotent)
+    cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+# ---------- ADDED: helpers to compute time in seconds and episode end ----------
+def _timecode_to_seconds(ts: str) -> Optional[int]:
+    """
+    Convert a timecode like '01:23:45' or '1:23:45' to integer seconds.
+    Returns None if parse fails or ts is falsy.
+    """
+    if not ts or not isinstance(ts, str):
+        return None
+    ts = ts.strip()
+    m = re.match(r"^(\d{1,2}):(\d{2}):(\d{2})$", ts)
+    if not m:
+        return None
+    hours, mins, secs = m.groups()
+    try:
+        return int(hours) * 3600 + int(mins) * 60 + int(secs)
+    except Exception:
+        return None
+
+def _episode_end_seconds(periodic_timestamps: Any) -> Optional[int]:
+    """
+    Robustly return episode length in seconds using the last timestamp entry from periodic_timestamps.
+
+    Accepts:
+      - None -> returns None
+      - list/tuple/np.ndarray/pd.Series of dicts or strings
+      - a single dict or string (will treat as length-1 list)
+    Returns: seconds (int) or None
+    """
+    if periodic_timestamps is None:
+        return None
+
+    # If it's a single dict or string, wrap it
+    if isinstance(periodic_timestamps, dict) or isinstance(periodic_timestamps, str):
+        periodic_timestamps = [periodic_timestamps]
+
+    # If it's a numpy array or pandas Series, convert to list
+    if isinstance(periodic_timestamps, (np.ndarray, pd.Series)):
+        try:
+            periodic_timestamps = list(periodic_timestamps)
+        except Exception:
+            # fallback
+            periodic_timestamps = None
+
+    # If after conversion it's falsy or not iterable, return None
+    try:
+        if not periodic_timestamps or len(periodic_timestamps) == 0:
+            return None
+    except Exception:
+        return None
+
+    # Get the last element
+    last = periodic_timestamps[-1]
+
+    # If last is a dict, try to find a timestamp-like key
+    if isinstance(last, dict):
+        for key in ("timestamp", "time", "ts", "start_time"):
+            val = last.get(key)
+            if isinstance(val, str) and re.match(r"^\d{1,2}:\d{2}:\d{2}$", val.strip()):
+                return _timecode_to_seconds(val.strip())
+        # fallback: scan values for timecode-looking strings
+        for v in last.values():
+            if isinstance(v, str) and re.match(r"^\d{1,2}:\d{2}:\d{2}$", v.strip()):
+                return _timecode_to_seconds(v.strip())
+        # if dict has numeric 'start_index' and there is 'timestamp' in another element earlier, you might need custom logic
+        return None
+
+    # If last is a string, try to parse it. It may contain a comma-separated list; take the last token.
+    if isinstance(last, str):
+        # sometimes it's "00:00:00, 00:01:00, 00:02:00" - split on comma and strip
+        parts = [p.strip() for p in re.split(r"[,\|;]", last) if p.strip()]
+        candidate = parts[-1] if parts else last.strip()
+        if re.match(r"^\d{1,2}:\d{2}:\d{2}$", candidate):
+            return _timecode_to_seconds(candidate)
+        # maybe it's not standard format
+        return None
+
+    # If it's numeric or other unhandled type, return None
+    return None
+
+
 # =========================================================================
 # 4. Main Logic Functions
 # =========================================================================
+
+
+# -------------------------------------------------------------------------
+# Restaurants processing (inc. regions data)
+# -------------------------------------------------------------------------
+
+def parse_restaurants_using_user_cleaners_v3(html_string: str) -> pd.DataFrame:
+    """
+    Corrected parser that uses the user's _clean_res primarily, with safe fallbacks.
+    Fixes the bug where <strong> content (sometimes containing both restaurant + guest)
+    was naively removed and left restaurant blank.
+    """
+    soup = BeautifulSoup(html_string, "html.parser")
+
+    rows: List[Dict] = []
+
+    for h3 in soup.find_all("h3"):
+        region_header = h3.get_text(" ", strip=True)
+        container = h3.find_parent("div") or h3.parent
+
+        current_subtitle = ""
+
+        # iterate in document order
+        for tag in container.find_all(recursive=True):
+            # subtitle detection: <p><strong> that isn't inside an <li>
+            if tag.name == "p" and tag.find_parent("li") is None:
+                strong = tag.find("strong")
+                if strong and strong.get_text(strip=True):
+                    current_subtitle = strong.get_text(" ", strip=True)
+                    continue
+
+            # process <li> entries
+            if tag.name == "li":
+                li = tag
+                li_text = li.get_text(" ", strip=True)
+
+                # --- Primary path: use the user's _clean_res (trusted) ---
+                cleaned_name = ""
+                mentions = []
+                try:
+                    cleaned_name, mentions = _clean_res(li)
+                except Exception:
+                    # If the user's cleaner throws for some reason, we'll fallback below
+                    cleaned_name, mentions = "", []
+
+                # --- If _clean_res produced an empty restaurant name, use safer fallbacks ---
+                if not cleaned_name:
+                    # 1) Prefer <a> anchor text if present
+                    a = li.find("a")
+                    if a and a.get_text(strip=True):
+                        candidate = a.get_text(" ", strip=True)
+                    else:
+                        # 2) Otherwise take the text before the first '(' or before an em-dash/hyphen
+                        # This mirrors the heuristic your original cleaner used but without removing STRONG text.
+                        if "(" in li_text:
+                            candidate = li_text.split("(", 1)[0].strip()
+                        else:
+                            candidate = re.split(r"[—–-]", li_text, maxsplit=1)[0].strip()
+
+                    # apply a light cleaning similar to your _clean_res (but conservative)
+                    candidate_clean = re.sub(r"[^\w\s]", "", candidate.strip().replace("&", "and"))
+                    candidate_clean = candidate_clean.replace("é", "e").replace("ô", "o")
+                    cleaned_name = candidate_clean
+
+                    # Try to extract mentions from parentheses if not captured earlier
+                    paren_matches = re.findall(r"\(([^)]*)\)", li_text)
+                    if paren_matches:
+                        # take last parentheses group (usually guest list)
+                        last_paren = paren_matches[-1]
+                        mentions = [m.strip() for m in re.split(r",\s*", last_paren) if m.strip()]
+                    else:
+                        # fallback: try to use <strong> inside li if present (last strong often contains guest)
+                        strongs = [s.get_text(" ", strip=True) for s in li.find_all("strong")]
+                        if strongs:
+                            last = strongs[-1]
+                            mentions = [m.strip() for m in re.split(r",\s*", last) if m.strip()]
+
+                # Build normalized key from the cleaned name
+                rest_key = _restaurant_key_from_clean_name(cleaned_name)
+
+                rows.append({
+                    "region_header": region_header,
+                    "subtitle": current_subtitle,
+                    "restaurant": cleaned_name,
+                    "guests": mentions,
+                    "restaurant_key": rest_key,
+                    "raw_html_segment": str(li)
+                })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.drop_duplicates(subset=["restaurant_key", "region_header"])
+
+    df = df[["region_header", "subtitle", "restaurant", "guests", "restaurant_key", "raw_html_segment"]]
+
+    return df
+
+
+def exact_merge_restaurants(scraped_df: pd.DataFrame,
+                            mentions_df: pd.DataFrame,
+                            mentions_rest_col: str = "Restaurant",
+                            scraped_rest_col: str = "restaurant"):
+    """
+    Exact (normalized) match between your mentions dataframe and the scraped restaurants.
+
+    Args:
+        scraped_df: DataFrame produced by your scraper. Must contain column named by scraped_rest_col.
+        mentions_df: Your top_mentions dataframe. Must contain a column named mentions_rest_col.
+        mentions_rest_col: column name in mentions_df with restaurant names (default "Restaurant")
+        scraped_rest_col: column name in scraped_df with restaurant names (default "restaurant")
+
+    Returns:
+        matched_df: mentions rows that found an exact normalized match, with scraped columns merged (left-join).
+        unmatched_mentions_df: mentions rows that did NOT match any scraped restaurant.
+        report: dict with counts {total_mentions, matched, unmatched}
+    """
+    # Work on copies to avoid mutating original frames
+    s = scraped_df.copy()
+    m = mentions_df.copy()
+
+    # Ensure columns exist
+    if scraped_rest_col not in s.columns:
+        raise KeyError(f"scraped_df must contain column '{scraped_rest_col}'")
+    if mentions_rest_col not in m.columns:
+        raise KeyError(f"mentions_df must contain column '{mentions_rest_col}'")
+
+    # Create normalized keys
+    s["_restaurant_key"] = s[scraped_rest_col].astype(str).apply(_normalize_for_match)
+    m["_restaurant_key"] = m[mentions_rest_col].astype(str).apply(_normalize_for_match)
+
+    # Remove empty keys from scraped (optional)
+    s = s[s["_restaurant_key"] != ""]
+
+    # Perform exact (normalized) left join: mentions -> scraped
+    merged = m.merge(s.drop_duplicates("_restaurant_key"), on="_restaurant_key", how="left", suffixes=("_mention", "_scrape"))
+
+    # Split matched / unmatched
+    matched = merged[merged[scraped_rest_col].notna()].copy()
+    unmatched = merged[merged[scraped_rest_col].isna()].copy()
+
+    report = {
+        "total_mentions": len(m),
+        "matched": len(matched),
+        "unmatched": len(unmatched)
+    }
+
+    # Drop internal key column from returned frames to keep things tidy (but keep if you want)
+    for df in (matched, unmatched):
+        if "_restaurant_key" in df.columns:
+            df.drop(columns=["_restaurant_key"], inplace=True)
+
+    return matched, unmatched, report
 
 # -------------------------------------------------------------------------
 # Epsisode metadata processsing
@@ -703,37 +1071,11 @@ def combine_timestamps_and_metadata(
 # -------------------------------------------------------------------------
 # Fuzzymatching and timestamp location for easy wins (top match)
 # -------------------------------------------------------------------------
-# V2 from V2_new_names_sandbox
-# Includes commented out debug statements
-# Unsure why this version worked in testing again (didn't yesterday)
-# Ensuring all helpers have been updated in case this is the issue
+# V6 from V2_new_names_sandbox
+# Includes pulling extra text from around the mention for richer quotes, flagging mentions in final 10% of ep
 def find_top_match_and_timestamps(
     combined_df: pd.DataFrame, min_match_score: int = 90
 ) -> pd.DataFrame:
-    """
-    Finds fuzzy matches for restaurant mentions in episode transcripts and associates them with timestamps.
-
-    This function iterates through each episode's metadata and transcript data. For each mentioned
-    restaurant, it performs a fuzzy search within the transcript. It then returns a DataFrame
-    of the top matches and their corresponding timestamps, or notes if no match was found.
-
-    Args:
-        combined_df (pd.DataFrame): A DataFrame containing episode metadata, cleaned transcripts,
-                                    and periodic timestamps.
-        min_match_score (int): The minimum fuzzy match score (0-100) required to consider
-                               a match valid.
-
-    Returns:
-        pd.DataFrame: A DataFrame where each row represents a restaurant mention. It contains
-                      the following columns:
-                          - 'slug': The episode slug e.g. ep-217-ross-noble or elle-fanning
-                          - 'Restaurant': The name of the restaurant mentioned.
-                          - 'Mention text': The original sentence where the mention was found.
-                          - 'Match Score': The fuzzy match score.
-                          - 'Match Type': The type of match (e.g., 'full, over 90' or 'No match found').
-                          - 'Timestamp': The nearest preceding timestamp for the mention.
-                          - 'Transcript sample': A short sample of the transcript text.
-    """
     all_mentions_collected = []
 
     for index, combined_row in combined_df.iterrows():
@@ -742,6 +1084,10 @@ def find_top_match_and_timestamps(
         clean_transcript_text = combined_row.get("clean_transcript_text")
         periodic_timestamps = combined_row.get("periodic_timestamps")
 
+        # *** CHANGED: ensure transcripts have starting point markers stripped earlier (if you added that)
+        if isinstance(clean_transcript_text, str):
+            clean_transcript_text = _strip_starting_point(clean_transcript_text)
+
         restaurants_data = combined_row.get("restaurants_mentioned", [])
         transcript_sample = (
             clean_transcript_text[:200]
@@ -749,85 +1095,116 @@ def find_top_match_and_timestamps(
             else "No Transcript Found"
         )
 
-        # Unsure what data type the res mentions are, hence need for this
+        # --- Standardize restaurants_list creation (UNCHANGED) ---
         restaurants_list = []
-        # print(f"The data type of the restaurant matches is{type(restaurants_data)}")
-        # print(f"restaurants data (raw) : {restaurants_data}")
         if isinstance(restaurants_data, list):
             restaurants_list = restaurants_data
         elif isinstance(restaurants_data, np.ndarray) and restaurants_data.size > 0:
-            # Flatten the array and convert it to a standard Python list of strings
             restaurants_raw_list = restaurants_data.flatten().tolist()
             restaurants_list = [
                 name.strip().lower() for name in restaurants_raw_list if name.strip()
             ]
-            # print(f"\n restauratns list (processed): {restaurants_list}")
         elif isinstance(restaurants_data, str):
             restaurants_list = [
                 name.strip() for name in restaurants_data.split(",") if name.strip()
             ]
+        # --- End Standardization ---
 
         if restaurants_list:
             episode_sentences_data = _create_list_tuple_clean_sen_og_sen_og_index(
                 clean_transcript_text
             )
-            searchable_sentences = [
-                item[0] for item in episode_sentences_data
-            ]  # This is to select the cleaned sentence from the list of tuple
-            # of cleaned sentence, original, and true start index that create_sentence_list creates
+            searchable_sentences = [item[0] for item in episode_sentences_data]
 
             all_matches_for_episode = _matches_by_res_name_from_list_of_res_names(
-                restaurants_list, searchable_sentences, 90
+                restaurants_list, searchable_sentences, min_match_score
             )
-            # --- all_matches_for_episode is a dict with key res_name and value lists of matches (matches r tuples of quote, score)
-            for (
-                restaurant_name_query,
-                match_list_for_query,
-            ) in all_matches_for_episode.items():
-                if match_list_for_query:
-                    top_match = match_list_for_query[0]
-                    # Unpack the top match's data
-                    matched_cleaned_text, score, matched_sentence_index = top_match
-                    original_sentence_data = episode_sentences_data[
-                        matched_sentence_index
-                    ]  # This takes you back to episode sentences data for the sentence index
-                    # Which is a tuple of clean sentence, original, and index of sentence within sen list
-                    original_sentence_text = original_sentence_data[
-                        1
-                    ]  # The og sentence is at index 1 in this tuple
-                    original_start_index = original_sentence_data[
-                        2
-                    ]  # The og start index is at index 2 in this tuple
 
-                    timestamp = _find_timestamp(
-                        original_start_index, periodic_timestamps
+            # *** ADDED: compute episode duration seconds once per episode
+            ep_seconds = _episode_end_seconds(periodic_timestamps) 
+
+            for (restaurant_name_query, match_list_for_query) in all_matches_for_episode.items():
+                
+                # Default mention structure for both SUCCESS and FAILURE
+                base_mention = {
+                    "Episode ID": slug,
+                    "Restaurant": restaurant_name_query,
+                    "Mention text": "",
+                    "Mention text full": "",
+                    "Mention text highlighted": "",
+                    "Match Score": 0,
+                    "Timestamp": "",
+                    "transcript_sample": transcript_sample,
+                    "match_in_final_10pct": False,
+                }
+                
+                # --- NEW LOGIC: Check for matches ---
+                if match_list_for_query:
+                    # Success: Match Found
+                    top_match = match_list_for_query[0]
+                    matched_cleaned_text, score, matched_sentence_index = top_match
+
+                    original_sentence_data = episode_sentences_data[matched_sentence_index]
+                    original_sentence_text = original_sentence_data[1]
+                    original_start_index = original_sentence_data[2]
+                    original_end_index = original_start_index + len(original_sentence_text)
+
+                    transcript_full = clean_transcript_text if isinstance(clean_transcript_text, str) else ""
+                    if transcript_full:
+                        transcript_full = _strip_starting_point(transcript_full)
+
+                    ctx_start, ctx_end, mention_text_full = _expand_context_around_match(
+                        transcript_full, original_start_index, original_end_index, target_chars=500
                     )
 
-                    mention = {
-                        "Episode ID": slug,
-                        "Restaurant": restaurant_name_query,
+                    highlight_rel_start = original_start_index - ctx_start
+                    highlight_rel_end = highlight_rel_start + len(original_sentence_text)
+
+                    mention_text_highlighted_html = _create_highlighted_html(
+                        mention_text_full, highlight_rel_start, highlight_rel_end
+                    )
+
+                    timestamp = _find_timestamp(original_start_index, periodic_timestamps)
+
+                    # Compute whether match is in final 10% of episode
+                    match_in_final_10pct = False
+                    if timestamp and ep_seconds:
+                        mention_seconds = _timecode_to_seconds(timestamp)
+                        if mention_seconds is not None and ep_seconds > 0:
+                            try:
+                                fraction = float(mention_seconds) / float(ep_seconds)
+                                # NOTE: Fraction >= 0.8 means final 20%, but based on the column name 
+                                # 'match_in_final_10pct' you might want to adjust this to 0.9. 
+                                # Keeping at 0.8 as in your original code.
+                                if fraction >= 0.8: 
+                                    match_in_final_10pct = True
+                            except Exception:
+                                match_in_final_10pct = False
+                    
+                    # Update base_mention with successful match data
+                    mention = base_mention.copy()
+                    mention.update({
                         "Mention text": original_sentence_text,
+                        "Mention text full": mention_text_full,
+                        "Mention text highlighted": mention_text_highlighted_html,
                         "Match Score": score,
                         "Match Type": f"full, over {min_match_score}",
                         "Timestamp": timestamp,
-                        "transcript_sample": transcript_sample,
-                    }
-                    all_mentions_collected.append(mention)
+                        "match_in_final_10pct": match_in_final_10pct,
+                    })
+
                 else:
-                    null_mention = {
-                        "Episode ID": slug,
-                        "Restaurant": restaurant_name_query,
-                        "Mention text": None,
-                        "Match Score": 0,
-                        "Match Type": "No match found",
-                        "Timestamp": None,
-                        "transcript_sample": transcript_sample,
-                    }
-                    all_mentions_collected.append(null_mention)
+                    # Failure: No Match Found (The essential fix)
+                    mention = base_mention.copy()
+                    mention["Match Type"] = "No match found" # <--- The key difference
+                
+                all_mentions_collected.append(mention)
+        
         else:
             print(
-                f"  No raw mentions found in 'restaurants_mentioned' list for Episode {slug}. Skipping"
+                f"  No raw mentions found in 'restaurants_mentioned' list for Episode {slug}. Skipping"
             )
+            
     combined_df = pd.DataFrame(all_mentions_collected)
     return combined_df
 
