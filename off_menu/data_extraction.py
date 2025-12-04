@@ -39,6 +39,7 @@ processed_data_path = os.path.join(project_root, "data/processed")
 # 3. Helper Functions
 # =========================================================================
 
+
 # Function to set up logger for new web scraper
 def configure_logger(log_file: Optional[str] = None, level: int = logging.DEBUG):
     """
@@ -69,6 +70,7 @@ def configure_logger(log_file: Optional[str] = None, level: int = logging.DEBUG)
 
     return logger
 
+
 # small sanitize helper (same as before)
 def _sanitize_key(key: str) -> str:
     if not isinstance(key, str):
@@ -78,6 +80,7 @@ def _sanitize_key(key: str) -> str:
     s = re.sub(r"-{2,}", "-", s)
     return s.strip("-_")
 
+
 # ---- Helper: random-ish UA list (small) ----
 _SIMPLE_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -85,8 +88,10 @@ _SIMPLE_USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64)",
 ]
 
+
 def _choose_headers():
     return {"User-Agent": random.choice(_SIMPLE_USER_AGENTS)}
+
 
 # ----- Helper to access retry limits from the server (for use in scraper)
 def _parse_retry_after(header_value: Optional[str]) -> Optional[float]:
@@ -116,7 +121,9 @@ def _parse_retry_after(header_value: Optional[str]) -> Optional[float]:
     except Exception:
         return None
 
+
 # Helper function to assimilate old legacy transcripts (find them, update status.json, rename them to new system)
+
 
 def assimilate_existing_transcripts(
     out_dir: Path,
@@ -191,14 +198,16 @@ def assimilate_existing_transcripts(
 
         if not candidates_for_num:
             # no matching slug for the number — skip for now
-            logger.debug("Found legacy file %s but no slug contains ep-%s; skipping", name, epnum)
+            logger.debug(
+                "Found legacy file %s but no slug contains ep-%s; skipping", name, epnum
+            )
             summary["skipped"] += 1
             continue
 
         # If multiple slugs match one number, prefer exact 'ep-<num>' prefix match
         chosen_slug = None
         for s in candidates_for_num:
-            if re.match(fr"^ep[-_]?{epnum}(\b|-|$)", s, flags=re.IGNORECASE):
+            if re.match(rf"^ep[-_]?{epnum}(\b|-|$)", s, flags=re.IGNORECASE):
                 chosen_slug = s
                 break
         if chosen_slug is None:
@@ -214,7 +223,11 @@ def assimilate_existing_transcripts(
                 logger.debug("Legacy file %s already at desired location %s", p, dest)
             elif dest.exists() and not overwrite:
                 # dest already exists (someone downloaded or moved it earlier) -> skip rename but update status to point to dest
-                logger.info("Destination %s exists; skipping move of %s (overwrite=False)", dest, p)
+                logger.info(
+                    "Destination %s exists; skipping move of %s (overwrite=False)",
+                    dest,
+                    p,
+                )
                 summary["skipped"] += 1
             else:
                 if rename_to_slug:
@@ -234,14 +247,30 @@ def assimilate_existing_transcripts(
             continue
 
         # Update status entry for chosen slug
-        meta = status.setdefault(chosen_slug, {"url": url_map.get(chosen_slug), "attempts": 0, "status": "pending", "saved_path": None, "last_error": None})
-        meta.update({
-            "attempts": max(meta.get("attempts", 0), 1),
-            "status": "success",
-            "saved_path": str(dest),
-            "last_error": None,
-        })
-        logger.info("Associated legacy file %s -> slug=%s saved_path=%s", name, chosen_slug, dest)
+        meta = status.setdefault(
+            chosen_slug,
+            {
+                "url": url_map.get(chosen_slug),
+                "attempts": 0,
+                "status": "pending",
+                "saved_path": None,
+                "last_error": None,
+            },
+        )
+        meta.update(
+            {
+                "attempts": max(meta.get("attempts", 0), 1),
+                "status": "success",
+                "saved_path": str(dest),
+                "last_error": None,
+            }
+        )
+        logger.info(
+            "Associated legacy file %s -> slug=%s saved_path=%s",
+            name,
+            chosen_slug,
+            dest,
+        )
         summary["mapped"] += 1
 
     logger.info("Assimilation summary: %s", summary)
@@ -261,7 +290,7 @@ def download_transcripts_legacy(
     max_workers: int = 3,
     session: Optional[requests.Session] = None,
     timeout: float = 12.0,
-    legacy_dir = None
+    legacy_dir=None,
 ) -> Dict[str, Dict]:
     """
     Download URLs to out_dir using url_map (keys are slugs used as filenames).
@@ -271,8 +300,12 @@ def download_transcripts_legacy(
     out_dir.mkdir(parents=True, exist_ok=True)
     status_path = Path(status_path)
 
-    logger.info("Starting download_transcripts: %d urls, out_dir=%s, status_path=%s",
-                len(url_map), out_dir, status_path)
+    logger.info(
+        "Starting download_transcripts: %d urls, out_dir=%s, status_path=%s",
+        len(url_map),
+        out_dir,
+        status_path,
+    )
 
     # Load existing status if present (allows resume)
     if status_path.exists():
@@ -281,7 +314,9 @@ def download_transcripts_legacy(
                 status = json.load(f)
             logger.debug("Loaded existing status.json with %d entries", len(status))
         except Exception as e:
-            logger.warning("Failed to load status.json (%s). Starting with empty status.", e)
+            logger.warning(
+                "Failed to load status.json (%s). Starting with empty status.", e
+            )
             status = {}
     else:
         logger.debug("No status.json file found at %s. Starting fresh.", status_path)
@@ -301,7 +336,14 @@ def download_transcripts_legacy(
 
     # try assimilating legacy files in out_dir and a legacy folder (if you have one)
     if legacy_dir:
-        status = assimilate_existing_transcripts(out_dir=out_dir, url_map=url_map, status=status, legacy_dir=legacy_dir, rename_to_slug=True, overwrite=False)
+        status = assimilate_existing_transcripts(
+            out_dir=out_dir,
+            url_map=url_map,
+            status=status,
+            legacy_dir=legacy_dir,
+            rename_to_slug=True,
+            overwrite=False,
+        )
         # persist immediately so the status file reflects these existing files
         with open(status_path, "w", encoding="utf-8") as f:
             json.dump(status, f, indent=2)
@@ -317,14 +359,20 @@ def download_transcripts_legacy(
 
         # If already succeeded, skip and log reason
         if meta.get("status") == "success":
-            logger.debug("Skipping key='%s' (already success, saved_path=%s)", key, meta.get("saved_path"))
+            logger.debug(
+                "Skipping key='%s' (already success, saved_path=%s)",
+                key,
+                meta.get("saved_path"),
+            )
             return result
 
         # If max attempts reached, log and skip
         if attempts >= max_attempts_per_url:
             result["status"] = "failed"
             result["last_error"] = "max_attempts_reached"
-            logger.info("Key='%s' reached max attempts (%d). Marking failed.", key, attempts)
+            logger.info(
+                "Key='%s' reached max attempts (%d). Marking failed.", key, attempts
+            )
             return result
 
         # Log the attempt about to be made
@@ -341,17 +389,23 @@ def download_transcripts_legacy(
 
                 # If file already exists, log that we're overwriting (helps debug)
                 if Path(saved_path).exists():
-                    logger.debug("File %s already exists and will be overwritten by key='%s'", saved_path, key)
+                    logger.debug(
+                        "File %s already exists and will be overwritten by key='%s'",
+                        saved_path,
+                        key,
+                    )
 
                 with open(saved_path, "w", encoding="utf-8") as fh:
                     fh.write(resp.text)
 
-                result.update({
-                    "attempts": attempts + 1,
-                    "status": "success",
-                    "saved_path": saved_path,
-                    "last_error": None,
-                })
+                result.update(
+                    {
+                        "attempts": attempts + 1,
+                        "status": "success",
+                        "saved_path": saved_path,
+                        "last_error": None,
+                    }
+                )
                 logger.info("Saved %s -> %s (key=%s)", url, saved_path, key)
                 return result
 
@@ -360,43 +414,69 @@ def download_transcripts_legacy(
                 # Parse Retry-After header if present and include in result
                 retry_after_raw = resp.headers.get("Retry-After")
                 retry_after_seconds = _parse_retry_after(retry_after_raw)
-                result.update({
-                    "attempts": attempts + 1,
-                    "status": "pending",
-                    "last_error": f"status_{resp.status_code}",
-                    "retry_after_seconds": retry_after_seconds,
-                })
-                logger.warning("Retryable HTTP %s for key='%s' url=%s (attempt %s)",
-                               resp.status_code, key, url, attempts + 1)
+                result.update(
+                    {
+                        "attempts": attempts + 1,
+                        "status": "pending",
+                        "last_error": f"status_{resp.status_code}",
+                        "retry_after_seconds": retry_after_seconds,
+                    }
+                )
+                logger.warning(
+                    "Retryable HTTP %s for key='%s' url=%s (attempt %s)",
+                    resp.status_code,
+                    key,
+                    url,
+                    attempts + 1,
+                )
                 # Log headers optionally for 429 to see Retry-After
                 if resp.status_code == 429:
-                    logger.debug("429 response headers for key='%s': Retry-After=%s", key, retry_after_raw)
-                    logger.debug("Parsed Retry-After seconds for key='%s': %s", key, retry_after_seconds)
+                    logger.debug(
+                        "429 response headers for key='%s': Retry-After=%s",
+                        key,
+                        retry_after_raw,
+                    )
+                    logger.debug(
+                        "Parsed Retry-After seconds for key='%s': %s",
+                        key,
+                        retry_after_seconds,
+                    )
                 return result
 
             # Non-retryable
-            result.update({
-                "attempts": attempts + 1,
-                "status": "failed",
-                "last_error": f"status_{resp.status_code}"
-            })
-            logger.error("Non-retryable HTTP %s for key='%s' url=%s", resp.status_code, key, url)
+            result.update(
+                {
+                    "attempts": attempts + 1,
+                    "status": "failed",
+                    "last_error": f"status_{resp.status_code}",
+                }
+            )
+            logger.error(
+                "Non-retryable HTTP %s for key='%s' url=%s", resp.status_code, key, url
+            )
             return result
 
         except requests.RequestException as e:
             # Network error: retryable
-            result.update({
-                "attempts": attempts + 1,
-                "status": "pending",
-                "last_error": repr(e)
-            })
-            logger.warning("RequestException for key='%s' url=%s (attempt %s): %s", key, url, attempts + 1, e)
+            result.update(
+                {"attempts": attempts + 1, "status": "pending", "last_error": repr(e)}
+            )
+            logger.warning(
+                "RequestException for key='%s' url=%s (attempt %s): %s",
+                key,
+                url,
+                attempts + 1,
+                e,
+            )
             return result
 
     # Worker wrapper with backoff
     def _worker_task(key):
         meta = status[key]
-        if meta.get("status") == "success" or meta.get("attempts", 0) >= max_attempts_per_url:
+        if (
+            meta.get("status") == "success"
+            or meta.get("attempts", 0) >= max_attempts_per_url
+        ):
             return key, meta
 
         new_meta = _attempt_download(key, meta)
@@ -418,14 +498,24 @@ def download_transcripts_legacy(
             # cap to avoid runaway sleeps (adjust cap as desired)
             sleep_time = min(sleep_time, 600.0)
 
-            logger.info("Backing off %0.2fs for key='%s' (attempt %s) [computed=%0.2fs, server=%s]",
-                        sleep_time, key, new_meta["attempts"], computed_sleep, retry_after)
+            logger.info(
+                "Backing off %0.2fs for key='%s' (attempt %s) [computed=%0.2fs, server=%s]",
+                sleep_time,
+                key,
+                new_meta["attempts"],
+                computed_sleep,
+                retry_after,
+            )
             time.sleep(sleep_time)
 
         return key, new_meta
 
     # Main loop
-    pending_keys = [k for k, v in status.items() if v["status"] != "success" and v["attempts"] < max_attempts_per_url]
+    pending_keys = [
+        k
+        for k, v in status.items()
+        if v["status"] != "success" and v["attempts"] < max_attempts_per_url
+    ]
     round_idx = 0
     while pending_keys:
         round_idx += 1
@@ -452,7 +542,11 @@ def download_transcripts_legacy(
             logger.exception("Failed to write status file: %s", e)
 
         # Prepare next round
-        pending_keys = [k for k, v in status.items() if v["status"] != "success" and v["attempts"] < max_attempts_per_url]
+        pending_keys = [
+            k
+            for k, v in status.items()
+            if v["status"] != "success" and v["attempts"] < max_attempts_per_url
+        ]
 
         if pending_keys:
             logger.info("Sleeping 2s between rounds to be polite...")
@@ -466,7 +560,9 @@ def download_transcripts_legacy(
     succ = sum(1 for v in status.values() if v.get("status") == "success")
     failed = sum(1 for v in status.values() if v.get("status") == "failed")
     pending = sum(1 for v in status.values() if v.get("status") == "pending")
-    logger.info("Download finished. success=%d failed=%d pending=%d", succ, failed, pending)
+    logger.info(
+        "Download finished. success=%d failed=%d pending=%d", succ, failed, pending
+    )
 
     return status
 
@@ -474,6 +570,7 @@ def download_transcripts_legacy(
 # =========================================================================
 # 4. Main Logic Functions
 # =========================================================================
+
 
 # Function to extract html (for episodes site and restaurants site)
 def extract_and_save_html(site_url, output_html_filepath):
@@ -492,18 +589,19 @@ def extract_and_save_html(site_url, output_html_filepath):
             os.makedirs(directory)
         save_text_to_file(html_content, filename, directory)
 
+
 # Orchestration function for the scraper, to scrape transcripts
 # Legacy compatible version (main edits in download_transcripts_legacy) to check for old style trasncripts and update filenames
 # replaces orchestrate_scraper which replaced extract_and_save_transcripts_html
 def orchestrate_scraper_legacy(
-    df,                     # DataFrame with 'slug' and optionally 'url'
-    base_url,               # base URL for constructing URLs if df has no 'url' column
-    out_dir,                # folder to save HTML transcripts
+    df,  # DataFrame with 'slug' and optionally 'url'
+    base_url,  # base URL for constructing URLs if df has no 'url' column
+    out_dir,  # folder to save HTML transcripts
     max_attempts_per_url=5,
     backoff_base=1.0,
     max_workers=3,
     timeout=12.0,
-    legacy_dir = None
+    legacy_dir=None,
 ):
     """
     Orchestrates the scraping process:
@@ -534,7 +632,10 @@ def orchestrate_scraper_legacy(
         url_map = {row["slug"]: row["url"] for _, row in df.iterrows()}
         logger.info("Using existing URLs from DataFrame")
     else:
-        url_map = {row["slug"]: base_url.rstrip("/") + "/" + row["slug"].lstrip("/") for _, row in df.iterrows()}
+        url_map = {
+            row["slug"]: base_url.rstrip("/") + "/" + row["slug"].lstrip("/")
+            for _, row in df.iterrows()
+        }
         logger.info("Constructed URLs from base_url and slugs")
 
     # ---------------------
@@ -556,7 +657,7 @@ def orchestrate_scraper_legacy(
         backoff_base=backoff_base,
         max_workers=max_workers,
         timeout=timeout,
-        legacy_dir=legacy_dir
+        legacy_dir=legacy_dir,
     )
 
     logger.info("Scraper orchestration finished")
@@ -598,7 +699,9 @@ if __name__ == "__main__":
     try:
         ep_meta_and_mentions_head_df = pd.read_parquet(ep_meta_and_mentions_head_path)
         # Testing on dummy data
-        orchestrate_scraper_legacy(ep_meta_and_mentions_head_df, transcript_base_url, test_temp_dir)
+        orchestrate_scraper_legacy(
+            ep_meta_and_mentions_head_df, transcript_base_url, test_temp_dir
+        )
     except FileNotFoundError:
         print(
             f"Error: The file was not found at {ep_meta_and_mentions_head_path}. Did it save correctly?"
