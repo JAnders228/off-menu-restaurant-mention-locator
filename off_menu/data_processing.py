@@ -33,6 +33,7 @@ episodes_html_filepath = os.path.join(
 # 3. Helper Functions
 # =========================================================================
 
+
 # -------------------------------------------------------------------------
 # Restaurants processing (inc. region data)
 # -------------------------------------------------------------------------
@@ -43,11 +44,13 @@ def _restaurant_key_from_clean_name(clean_name: str) -> str:
     k = re.sub(r"\s+", " ", k).strip()
     return k
 
+
 # -------------------------------------------------------------------------
 # Episodes processing
 # -------------------------------------------------------------------------
 
-# Helper function to create slugs, which will be used as unique ep identifiers now that numbers 
+
+# Helper function to create slugs, which will be used as unique ep identifiers now that numbers
 # are no longer give, and will form the end of URL's
 # Used in create_ep_slugs_guests_from_html
 def slugify(text: str) -> str:
@@ -63,6 +66,7 @@ def slugify(text: str) -> str:
     # collapse whitespace to single dash and strip leading/trailing dashes
     s = re.sub(r"\s+", "-", s).strip("-")
     return s.lower()
+
 
 # Helper function to generate the guests name from the raw ep title, needed to match episodes to restaurant mentions
 # Restaurant mentions are listed by guest name, not ep number or slug
@@ -96,7 +100,6 @@ def extract_guest_name(raw_title: str) -> str:
     candidate = re.sub(r"\s+", " ", candidate).strip()
 
     return candidate
-
 
 
 # Function to create a url from new dataframe rows in episodes metadata (slugs version)
@@ -154,6 +157,7 @@ def _create_restaurants_by_res_name_dict(html_string: str) -> Dict[str, List[str
 
 
 # Helper for merging restaurants region data with matches
+
 
 def _normalize_for_match(s: str) -> str:
     """
@@ -352,6 +356,7 @@ def _find_timestamp(
 
     return None  # If no timestamp found before the quote's starting position (all eps start "Starting point is 00:00:00")
 
+
 def _matches_by_res_name_from_list_of_res_names(
     restaurant_names: List[str], searchable_sentences: List[str], min_score: int
 ) -> Dict[str, List[Tuple[str, int, int]]]:
@@ -405,10 +410,7 @@ def _matches_by_res_name_from_list_of_res_names(
 
 
 def _expand_context_around_match(
-    transcript: str,
-    match_start: int,
-    match_end: int,
-    target_chars: int = 500
+    transcript: str, match_start: int, match_end: int, target_chars: int = 500
 ) -> Tuple[int, int, str]:
     """
     Expand a context window around [match_start:match_end] inside transcript,
@@ -468,7 +470,9 @@ def _expand_context_around_match(
     return start_candidate, end_candidate, transcript[start_candidate:end_candidate]
 
 
-def _create_highlighted_html(context_str: str, match_rel_start: int, match_rel_end: int) -> str:
+def _create_highlighted_html(
+    context_str: str, match_rel_start: int, match_rel_end: int
+) -> str:
     """
     Escape HTML in context_str, then wrap the slice [match_rel_start:match_rel_end] with <mark>.
     match_rel_* are indices relative to context_str.
@@ -493,6 +497,7 @@ def _create_highlighted_html(context_str: str, match_rel_start: int, match_rel_e
     # Wrap middle in <mark>
     return f"{before}<mark>{middle}</mark>{after}"
 
+
 def _strip_starting_point(transcript: str) -> str:
     """
     Remove phrases like 'starting point is 00:00:00' (case-insensitive) from transcript.
@@ -506,6 +511,7 @@ def _strip_starting_point(transcript: str) -> str:
     # Run twice to remove repeated occurrences (idempotent)
     cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
     return cleaned
+
 
 # ---------- ADDED: helpers to compute time in seconds and episode end ----------
 def _timecode_to_seconds(ts: str) -> Optional[int]:
@@ -524,6 +530,7 @@ def _timecode_to_seconds(ts: str) -> Optional[int]:
         return int(hours) * 3600 + int(mins) * 60 + int(secs)
     except Exception:
         return None
+
 
 def _episode_end_seconds(periodic_timestamps: Any) -> Optional[int]:
     """
@@ -596,6 +603,7 @@ def _episode_end_seconds(periodic_timestamps: Any) -> Optional[int]:
 # Restaurants processing (inc. regions data)
 # -------------------------------------------------------------------------
 
+
 def parse_restaurants_using_user_cleaners_v3(html_string: str) -> pd.DataFrame:
     """
     Corrected parser that uses the user's _clean_res primarily, with safe fallbacks.
@@ -647,11 +655,17 @@ def parse_restaurants_using_user_cleaners_v3(html_string: str) -> pd.DataFrame:
                         if "(" in li_text:
                             candidate = li_text.split("(", 1)[0].strip()
                         else:
-                            candidate = re.split(r"[—–-]", li_text, maxsplit=1)[0].strip()
+                            candidate = re.split(r"[—–-]", li_text, maxsplit=1)[
+                                0
+                            ].strip()
 
                     # apply a light cleaning similar to your _clean_res (but conservative)
-                    candidate_clean = re.sub(r"[^\w\s]", "", candidate.strip().replace("&", "and"))
-                    candidate_clean = candidate_clean.replace("é", "e").replace("ô", "o")
+                    candidate_clean = re.sub(
+                        r"[^\w\s]", "", candidate.strip().replace("&", "and")
+                    )
+                    candidate_clean = candidate_clean.replace("é", "e").replace(
+                        "ô", "o"
+                    )
                     cleaned_name = candidate_clean
 
                     # Try to extract mentions from parentheses if not captured earlier
@@ -659,39 +673,60 @@ def parse_restaurants_using_user_cleaners_v3(html_string: str) -> pd.DataFrame:
                     if paren_matches:
                         # take last parentheses group (usually guest list)
                         last_paren = paren_matches[-1]
-                        mentions = [m.strip() for m in re.split(r",\s*", last_paren) if m.strip()]
+                        mentions = [
+                            m.strip()
+                            for m in re.split(r",\s*", last_paren)
+                            if m.strip()
+                        ]
                     else:
                         # fallback: try to use <strong> inside li if present (last strong often contains guest)
-                        strongs = [s.get_text(" ", strip=True) for s in li.find_all("strong")]
+                        strongs = [
+                            s.get_text(" ", strip=True) for s in li.find_all("strong")
+                        ]
                         if strongs:
                             last = strongs[-1]
-                            mentions = [m.strip() for m in re.split(r",\s*", last) if m.strip()]
+                            mentions = [
+                                m.strip() for m in re.split(r",\s*", last) if m.strip()
+                            ]
 
                 # Build normalized key from the cleaned name
                 rest_key = _restaurant_key_from_clean_name(cleaned_name)
 
-                rows.append({
-                    "region_header": region_header,
-                    "subtitle": current_subtitle,
-                    "restaurant": cleaned_name,
-                    "guests": mentions,
-                    "restaurant_key": rest_key,
-                    "raw_html_segment": str(li)
-                })
+                rows.append(
+                    {
+                        "region_header": region_header,
+                        "subtitle": current_subtitle,
+                        "restaurant": cleaned_name,
+                        "guests": mentions,
+                        "restaurant_key": rest_key,
+                        "raw_html_segment": str(li),
+                    }
+                )
 
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.drop_duplicates(subset=["restaurant_key", "region_header"])
 
-    df = df[["region_header", "subtitle", "restaurant", "guests", "restaurant_key", "raw_html_segment"]]
+    df = df[
+        [
+            "region_header",
+            "subtitle",
+            "restaurant",
+            "guests",
+            "restaurant_key",
+            "raw_html_segment",
+        ]
+    ]
 
     return df
 
 
-def exact_merge_restaurants(scraped_df: pd.DataFrame,
-                            mentions_df: pd.DataFrame,
-                            mentions_rest_col: str = "Restaurant",
-                            scraped_rest_col: str = "restaurant"):
+def exact_merge_restaurants(
+    scraped_df: pd.DataFrame,
+    mentions_df: pd.DataFrame,
+    mentions_rest_col: str = "Restaurant",
+    scraped_rest_col: str = "restaurant",
+):
     """
     Exact (normalized) match between your mentions dataframe and the scraped restaurants.
 
@@ -724,7 +759,12 @@ def exact_merge_restaurants(scraped_df: pd.DataFrame,
     s = s[s["_restaurant_key"] != ""]
 
     # Perform exact (normalized) left join: mentions -> scraped
-    merged = m.merge(s.drop_duplicates("_restaurant_key"), on="_restaurant_key", how="left", suffixes=("_mention", "_scrape"))
+    merged = m.merge(
+        s.drop_duplicates("_restaurant_key"),
+        on="_restaurant_key",
+        how="left",
+        suffixes=("_mention", "_scrape"),
+    )
 
     # Split matched / unmatched
     matched = merged[merged[scraped_rest_col].notna()].copy()
@@ -733,7 +773,7 @@ def exact_merge_restaurants(scraped_df: pd.DataFrame,
     report = {
         "total_mentions": len(m),
         "matched": len(matched),
-        "unmatched": len(unmatched)
+        "unmatched": len(unmatched),
     }
 
     # Drop internal key column from returned frames to keep things tidy (but keep if you want)
@@ -743,14 +783,18 @@ def exact_merge_restaurants(scraped_df: pd.DataFrame,
 
     return matched, unmatched, report
 
+
 # -------------------------------------------------------------------------
 # Epsisode metadata processsing
 # -------------------------------------------------------------------------
 
-# Function to create slugs and guest names from html 
+# Function to create slugs and guest names from html
 # Replaces create_numbers_names_dict_from_html
 
-def create_tuple_inc_ep_slugs_guests_list_from_html(html_string: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+
+def create_tuple_inc_ep_slugs_guests_list_from_html(
+    html_string: str,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
     Parse episodes HTML and return a tuple:
       (
@@ -758,17 +802,17 @@ def create_tuple_inc_ep_slugs_guests_list_from_html(html_string: str) -> Tuple[L
         [list of raw_titles for excluded 'Best of' episodes]
       )
     """
-    
+
     soup = BeautifulSoup(html_string, "html.parser")
     episode_divs = soup.find_all("div", class_="image-slide-title")
 
     # 1. Initialize two separate lists
     records: List[Dict[str, Any]] = []
-    exceptions: List[str] = [] 
+    exceptions: List[str] = []
 
     for div in episode_divs:
         raw_title = div.get_text(separator=" ", strip=True)
-        
+
         # 2. Check the condition using the string method
         if raw_title.startswith("Best of"):
             # 3. If it is a "Best of" episode, append the title to the exceptions list
@@ -777,17 +821,15 @@ def create_tuple_inc_ep_slugs_guests_list_from_html(html_string: str) -> Tuple[L
             continue
         # menus to be buried with exception?
         # christmas dinner party exception?
-            
+
         # If the 'if' condition was false (i.e., it's a regular episode), the code continues here:
-        
+
         guest_name = extract_guest_name(raw_title)
         slug_full = slugify(raw_title)
 
-        records.append({
-            "raw_title": raw_title,
-            "slug": slug_full,
-            "guest_name": guest_name
-        })
+        records.append(
+            {"raw_title": raw_title, "slug": slug_full, "guest_name": guest_name}
+        )
 
     # 4. Return both lists as a tuple
     return records, exceptions
@@ -795,6 +837,7 @@ def create_tuple_inc_ep_slugs_guests_list_from_html(html_string: str) -> Tuple[L
 
 # Function to create slugs and guest names dataframe from the dict made by create_ep_slugs_guests_from_html
 # Replaces create_numbers_names_df_from_dict
+
 
 def create_slugs_guests_df_from_list_of_dict(titles_list: Dict) -> pd.DataFrame:
     """
@@ -830,7 +873,6 @@ def create_urls_and_save_to_slugs_guests_df(
     df = input_dataframe
     df["url"] = df.apply(_create_url_from_row, axis=1)
     df.to_parquet(output_filepath)
-
 
 
 # -------------------------------------------------------------------------
@@ -926,7 +968,6 @@ def combine_save_mentions_and_ep_metadata_dfs(
     ep_meta_and_mentions_df.to_parquet(output_df_filepath, index=False)
 
 
-
 # -------------------------------------------------------------------------
 # Cleaning transcripts & Collating timestamps
 # -------------------------------------------------------------------------
@@ -1012,8 +1053,9 @@ def extract_save_clean_text_and_periodic_timestamps(
             pd.DataFrame().to_parquet(output_filepath, index=False)  # Save an empty DF
 
 
-def get_unprocessed_episodes(full_metadata_path: str,
-                             processed_parquet_path: str) -> pd.DataFrame:
+def get_unprocessed_episodes(
+    full_metadata_path: str, processed_parquet_path: str
+) -> pd.DataFrame:
     """
     Returns a filtered episodes_df containing only episodes that have NOT
     already been processed into the output parquet.
@@ -1035,10 +1077,13 @@ def get_unprocessed_episodes(full_metadata_path: str,
     # Filter metadata
     unprocessed_df = episodes_df[~episodes_df["slug"].isin(processed_slugs)]
 
-    print(f"Found {len(unprocessed_df)} unprocessed episodes "
-          f"({len(processed_slugs)} already processed).")
+    print(
+        f"Found {len(unprocessed_df)} unprocessed episodes "
+        f"({len(processed_slugs)} already processed)."
+    )
 
     return unprocessed_df
+
 
 # -------------------------------------------------------------------------
 # Combining episode metadata with transcripts and timestamps
@@ -1121,10 +1166,13 @@ def find_top_match_and_timestamps(
             )
 
             # *** ADDED: compute episode duration seconds once per episode
-            ep_seconds = _episode_end_seconds(periodic_timestamps) 
+            ep_seconds = _episode_end_seconds(periodic_timestamps)
 
-            for (restaurant_name_query, match_list_for_query) in all_matches_for_episode.items():
-                
+            for (
+                restaurant_name_query,
+                match_list_for_query,
+            ) in all_matches_for_episode.items():
+
                 # Default mention structure for both SUCCESS and FAILURE
                 base_mention = {
                     "Episode ID": slug,
@@ -1137,34 +1185,51 @@ def find_top_match_and_timestamps(
                     "transcript_sample": transcript_sample,
                     "match_in_final_10pct": False,
                 }
-                
+
                 # --- NEW LOGIC: Check for matches ---
                 if match_list_for_query:
                     # Success: Match Found
                     top_match = match_list_for_query[0]
                     matched_cleaned_text, score, matched_sentence_index = top_match
 
-                    original_sentence_data = episode_sentences_data[matched_sentence_index]
+                    original_sentence_data = episode_sentences_data[
+                        matched_sentence_index
+                    ]
                     original_sentence_text = original_sentence_data[1]
                     original_start_index = original_sentence_data[2]
-                    original_end_index = original_start_index + len(original_sentence_text)
+                    original_end_index = original_start_index + len(
+                        original_sentence_text
+                    )
 
-                    transcript_full = clean_transcript_text if isinstance(clean_transcript_text, str) else ""
+                    transcript_full = (
+                        clean_transcript_text
+                        if isinstance(clean_transcript_text, str)
+                        else ""
+                    )
                     if transcript_full:
                         transcript_full = _strip_starting_point(transcript_full)
 
-                    ctx_start, ctx_end, mention_text_full = _expand_context_around_match(
-                        transcript_full, original_start_index, original_end_index, target_chars=500
+                    ctx_start, ctx_end, mention_text_full = (
+                        _expand_context_around_match(
+                            transcript_full,
+                            original_start_index,
+                            original_end_index,
+                            target_chars=500,
+                        )
                     )
 
                     highlight_rel_start = original_start_index - ctx_start
-                    highlight_rel_end = highlight_rel_start + len(original_sentence_text)
+                    highlight_rel_end = highlight_rel_start + len(
+                        original_sentence_text
+                    )
 
                     mention_text_highlighted_html = _create_highlighted_html(
                         mention_text_full, highlight_rel_start, highlight_rel_end
                     )
 
-                    timestamp = _find_timestamp(original_start_index, periodic_timestamps)
+                    timestamp = _find_timestamp(
+                        original_start_index, periodic_timestamps
+                    )
 
                     # Compute whether match is in final 10% of episode
                     match_in_final_10pct = False
@@ -1173,38 +1238,40 @@ def find_top_match_and_timestamps(
                         if mention_seconds is not None and ep_seconds > 0:
                             try:
                                 fraction = float(mention_seconds) / float(ep_seconds)
-                                # NOTE: Fraction >= 0.8 means final 20%, but based on the column name 
-                                # 'match_in_final_10pct' you might want to adjust this to 0.9. 
+                                # NOTE: Fraction >= 0.8 means final 20%, but based on the column name
+                                # 'match_in_final_10pct' you might want to adjust this to 0.9.
                                 # Keeping at 0.8 as in your original code.
-                                if fraction >= 0.8: 
+                                if fraction >= 0.8:
                                     match_in_final_10pct = True
                             except Exception:
                                 match_in_final_10pct = False
-                    
+
                     # Update base_mention with successful match data
                     mention = base_mention.copy()
-                    mention.update({
-                        "Mention text": original_sentence_text,
-                        "Mention text full": mention_text_full,
-                        "Mention text highlighted": mention_text_highlighted_html,
-                        "Match Score": score,
-                        "Match Type": f"full, over {min_match_score}",
-                        "Timestamp": timestamp,
-                        "match_in_final_10pct": match_in_final_10pct,
-                    })
+                    mention.update(
+                        {
+                            "Mention text": original_sentence_text,
+                            "Mention text full": mention_text_full,
+                            "Mention text highlighted": mention_text_highlighted_html,
+                            "Match Score": score,
+                            "Match Type": f"full, over {min_match_score}",
+                            "Timestamp": timestamp,
+                            "match_in_final_10pct": match_in_final_10pct,
+                        }
+                    )
 
                 else:
                     # Failure: No Match Found (The essential fix)
                     mention = base_mention.copy()
-                    mention["Match Type"] = "No match found" # <--- The key difference
-                
+                    mention["Match Type"] = "No match found"  # <--- The key difference
+
                 all_mentions_collected.append(mention)
-        
+
         else:
             print(
                 f"  No raw mentions found in 'restaurants_mentioned' list for Episode {slug}. Skipping"
             )
-            
+
     combined_df = pd.DataFrame(all_mentions_collected)
     return combined_df
 
@@ -1232,25 +1299,34 @@ if __name__ == "__main__":
             html_text = f.read()
 
         # Create slug -> guest dict
-        slugs_guests_and_exclusions_tuple = create_tuple_inc_ep_slugs_guests_list_from_html(html_text)
+        slugs_guests_and_exclusions_tuple = (
+            create_tuple_inc_ep_slugs_guests_list_from_html(html_text)
+        )
         slugs_guests_dict_list = slugs_guests_and_exclusions_tuple[0]
         print("Sample slugs -> guest mapping:", list(slugs_guests_dict_list[:3]))
 
         # Convert to DataFrame
-        df_episodes_metadata = create_slugs_guests_df_from_list_of_dict(slugs_guests_dict_list)
+        df_episodes_metadata = create_slugs_guests_df_from_list_of_dict(
+            slugs_guests_dict_list
+        )
         print("Episode metadata DF head:")
         print(df_episodes_metadata.head())
 
     except FileNotFoundError:
         print(f"Error: {episodes_html_filepath} not found.")
 
-
     # ---Testing function to create URL's using dummy data---
 
     print("\n=== Testing URL creation ===")
-    df_episodes_metadata_with_urls_filepath = os.path.join(test_temp_dir, "df_episodes_metadata_with_urls.parquet")
-    create_urls_and_save_to_slugs_guests_df(df_episodes_metadata, df_episodes_metadata_with_urls_filepath)
-    df_episodes_metadata_with_urls = try_read_parquet(df_episodes_metadata_with_urls_filepath)
+    df_episodes_metadata_with_urls_filepath = os.path.join(
+        test_temp_dir, "df_episodes_metadata_with_urls.parquet"
+    )
+    create_urls_and_save_to_slugs_guests_df(
+        df_episodes_metadata, df_episodes_metadata_with_urls_filepath
+    )
+    df_episodes_metadata_with_urls = try_read_parquet(
+        df_episodes_metadata_with_urls_filepath
+    )
     print("URLs added to DF head:")
     print(df_episodes_metadata_with_urls.head())
 
@@ -1281,7 +1357,9 @@ if __name__ == "__main__":
     mentions_raw_df = pd.DataFrame(
         mentions_raw_data, columns=["restaurant_name", "guests_mentioned"]
     )
-    print("\n=== Corrected mentions DataFrame (first 5 rows):\n", mentions_raw_df.head())
+    print(
+        "\n=== Corrected mentions DataFrame (first 5 rows):\n", mentions_raw_df.head()
+    )
 
     # 3. 'Explode' the dataframe, so each guest mention has their own row (the restairant name will be dupicated)
     restaurant_guest_df = mentions_raw_df.explode("guests_mentioned")
@@ -1306,20 +1384,27 @@ if __name__ == "__main__":
     # ---Testing merging restaurant mentions dataframe with numbers, names, url---
 
     print("\n=== Testing combining episode metadata and mentions ===")
-    test_full_episodes_metadata_combined_path = os.path.join(test_temp_dir, "test_full_episodes_metadata_slugs_combined.parquet")
-    print(f"restaurant_guest_df type is {type(restaurant_guest_df)}")
-    print(f"df_episodes_metadata_with_urls type is {type(df_episodes_metadata_with_urls_filepath)}")
-    combine_save_mentions_and_ep_metadata_dfs(
-        restaurant_guest_df, df_episodes_metadata_with_urls_filepath, test_full_episodes_metadata_combined_path
+    test_full_episodes_metadata_combined_path = os.path.join(
+        test_temp_dir, "test_full_episodes_metadata_slugs_combined.parquet"
     )
-    combined_df_head = try_read_parquet(test_full_episodes_metadata_combined_path).head()
+    print(f"restaurant_guest_df type is {type(restaurant_guest_df)}")
+    print(
+        f"df_episodes_metadata_with_urls type is {type(df_episodes_metadata_with_urls_filepath)}"
+    )
+    combine_save_mentions_and_ep_metadata_dfs(
+        restaurant_guest_df,
+        df_episodes_metadata_with_urls_filepath,
+        test_full_episodes_metadata_combined_path,
+    )
+    combined_df_head = try_read_parquet(
+        test_full_episodes_metadata_combined_path
+    ).head()
     print("\n=== Combined df head ===")
     print(combined_df_head.head())
 
     # Saving combined df (metadata, res mentions) to filepath for use in timestamp collation function
     combined_df_head_filepath = os.path.join(test_temp_dir, "combined_df_head")
     combined_df_head.to_parquet(combined_df_head_filepath)
-    
 
     # -------------------------------------------------------------------------
     # Downloading transcripts
@@ -1328,35 +1413,49 @@ if __name__ == "__main__":
     # Testing transcript productinon
     print("\n=== Testing transcript download ===")
     transcripts_dir = os.path.join("data/test_temp", "transcripts_sample")
-    output_filepath = os.path.join("data/test_temp", "test_transcripts_data_processing_script.parquet")
+    output_filepath = os.path.join(
+        "data/test_temp", "test_transcripts_data_processing_script.parquet"
+    )
 
     orchestrate_scraper_legacy(
         df=combined_df_head,  # only a small batch for testing
-        base_url= transcript_base_url,
+        base_url=transcript_base_url,
         out_dir=transcripts_dir,
         max_attempts_per_url=3,
-        max_workers=1)
+        max_workers=1,
+    )
     # -------------------------------------------------------------------------
-    # Cleaning and Collating timestamps from transcripts 
+    # Cleaning and Collating timestamps from transcripts
     # -------------------------------------------------------------------------
     print("\n=== Testing clean transcript, timestamp production and saving ===")
     test_five_full_data_and_transcripts_timestamps_path = os.path.join(
-        test_temp_dir, "test_five_full_data_and_transcripts_timestamps_slug_ver_df.parquet")
-    
+        test_temp_dir,
+        "test_five_full_data_and_transcripts_timestamps_slug_ver_df.parquet",
+    )
+
     try:
-        extract_save_clean_text_and_periodic_timestamps(combined_df_head_filepath, transcripts_dir, test_five_full_data_and_transcripts_timestamps_path)
-        print(f"\nSuccessfully extracted clean text and timestamps, here's dataframe which was saved")
+        extract_save_clean_text_and_periodic_timestamps(
+            combined_df_head_filepath,
+            transcripts_dir,
+            test_five_full_data_and_transcripts_timestamps_path,
+        )
+        print(
+            f"\nSuccessfully extracted clean text and timestamps, here's dataframe which was saved"
+        )
         print(try_read_parquet(test_five_full_data_and_transcripts_timestamps_path))
     except Exception as e:
-        print(f"\nError with extracting clean text and timestamps from combined metadata mentions df: {e}")
-    
+        print(
+            f"\nError with extracting clean text and timestamps from combined metadata mentions df: {e}"
+        )
 
     # -------------------------------------------------------------------------
     # Fuzzywuzzy easy wins and timestamp matching
     # -------------------------------------------------------------------------
 
     # --- Read test dataframes, merge for ease of processing ---
-    combined_test_df = try_read_parquet(test_five_full_data_and_transcripts_timestamps_path)
+    combined_test_df = try_read_parquet(
+        test_five_full_data_and_transcripts_timestamps_path
+    )
 
     # --- Run top matches on the test data ---
     top_mentions_df = find_top_match_and_timestamps(combined_test_df, 90)
@@ -1368,12 +1467,16 @@ if __name__ == "__main__":
 
     # --- TEMPORARILY CHANGE PANDAS DISPLAY SETTINGS ---
     # Set the maximum column width to a high number (or 0 for unlimited)
-    pd.set_option('display.max_colwidth', None) 
+    pd.set_option("display.max_colwidth", None)
     # Set max rows to ensure all head rows are displayed
-    pd.set_option('display.max_rows', 500) 
+    pd.set_option("display.max_rows", 500)
 
     # Now print the full content
-    print(top_mentions_df[['Episode ID', 'Restaurant', 'Mention text', 'Timestamp']].head(10)) 
+    print(
+        top_mentions_df[["Episode ID", "Restaurant", "Mention text", "Timestamp"]].head(
+            10
+        )
+    )
 
-    pd.reset_option('display.max_colwidth')
-    pd.reset_option('display.max_rows')
+    pd.reset_option("display.max_colwidth")
+    pd.reset_option("display.max_rows")

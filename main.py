@@ -8,22 +8,21 @@ import traceback
 # --- 1. Import Pipeline Functions ---
 from off_menu.data_extraction import (
     extract_and_save_html,
-    orchestrate_scraper_legacy # replaces extract_and_save_transcripts_html,
+    orchestrate_scraper_legacy,  # replaces extract_and_save_transcripts_html,
 )
 from off_menu.data_processing import (
-    create_tuple_inc_ep_slugs_guests_list_from_html, # replace create_numbers_names_dict_from_html
-    create_slugs_guests_df_from_list_of_dict, # replaces create_numbers_names_df_from_dict
-    create_urls_and_save_to_slugs_guests_df, # replaces create_urls_and_save_to_numbers_names_df
+    create_tuple_inc_ep_slugs_guests_list_from_html,  # replace create_numbers_names_dict_from_html
+    create_slugs_guests_df_from_list_of_dict,  # replaces create_numbers_names_df_from_dict
+    create_urls_and_save_to_slugs_guests_df,  # replaces create_urls_and_save_to_numbers_names_df
     create_mentions_by_res_name_dict,
     create_return_exploded_res_mentions_df,
     combine_save_mentions_and_ep_metadata_dfs,
-    extract_save_clean_text_and_periodic_timestamps, #replaces extract_clean_text_and_periodic_timestamps
+    extract_save_clean_text_and_periodic_timestamps,  # replaces extract_clean_text_and_periodic_timestamps
     combine_timestamps_and_metadata,
     find_top_match_and_timestamps,
     get_unprocessed_episodes,
     parse_restaurants_using_user_cleaners_v3,
-    exact_merge_restaurants
-    
+    exact_merge_restaurants,
 )
 from off_menu.utils import try_read_parquet, try_read_html_string_from_filepath
 
@@ -84,21 +83,27 @@ def main():
         # Step 2.1 Create tuple containing two lists
         # The first list is a list of dicts of raw titles, slugs and guest names
         # Which will be used for onwards processing into a full metadata dataframe
-        # The second is exceptions (e.g. best of) which will not be included 
+        # The second is exceptions (e.g. best of) which will not be included
 
         episodes_html_str = try_read_html_string_from_filepath(episodes_html_filepath)
 
-        title_slugs_guestnames_list = create_tuple_inc_ep_slugs_guests_list_from_html(episodes_html_str)[0]
+        title_slugs_guestnames_list = create_tuple_inc_ep_slugs_guests_list_from_html(
+            episodes_html_str
+        )[0]
 
         # Step 2.2 Create titles, slugs, guest names dataframe from list of dicts of raw titles, slugs and guest names
-        title_slugs_guestnames_df = create_slugs_guests_df_from_list_of_dict(title_slugs_guestnames_list)
+        title_slugs_guestnames_df = create_slugs_guests_df_from_list_of_dict(
+            title_slugs_guestnames_list
+        )
 
         # Step 2.3 Create URL's and add to the datframe, save dataframe
 
         create_urls_and_save_to_slugs_guests_df(
             title_slugs_guestnames_df, processed_metadata_filepath_for_saving
         )
-        titles_slugs_guestnames_urls_df = try_read_parquet(processed_metadata_filepath_for_saving)
+        titles_slugs_guestnames_urls_df = try_read_parquet(
+            processed_metadata_filepath_for_saving
+        )
 
         # Step 2.4 Create a dataframe of restaurants including guests who mention, and their regions
 
@@ -107,11 +112,17 @@ def main():
         )
         restaurants_html = try_read_html_string_from_filepath(restaurants_html_filepath)
 
-        restaurants_and_regions_df = parse_restaurants_using_user_cleaners_v3(restaurants_html)
+        restaurants_and_regions_df = parse_restaurants_using_user_cleaners_v3(
+            restaurants_html
+        )
 
-        restaurants_and_regions_df.to_parquet(restaurants_and_regions_filepath_for_saving)
+        restaurants_and_regions_df.to_parquet(
+            restaurants_and_regions_filepath_for_saving
+        )
 
-        print("STAGE 2 Complete: raw titles, slugs, guestnames, urls dataframe saved. Restaurants and regions dataframe saved")
+        print(
+            "STAGE 2 Complete: raw titles, slugs, guestnames, urls dataframe saved. Restaurants and regions dataframe saved"
+        )
 
         # =====================================================================
         # STAGE 3: Dependent Extraction (Download Full HTML Transcripts)
@@ -122,18 +133,20 @@ def main():
         # Consider adding function to check for old style transcripts and update status accordingly
 
         raw_transcripts_output_dir = os.path.join(RAW_DATA_DIR, "transcripts_htmls")
-        
+
         orchestrate_scraper_legacy(
-            df = titles_slugs_guestnames_urls_df, 
-            base_url=transcript_base_url, 
-            out_dir = raw_transcripts_output_dir,
-            max_attempts_per_url= 5, 
-            backoff_base= 1,
-            max_workers= 3,
-            legacy_dir=raw_transcripts_output_dir
+            df=titles_slugs_guestnames_urls_df,
+            base_url=transcript_base_url,
+            out_dir=raw_transcripts_output_dir,
+            max_attempts_per_url=5,
+            backoff_base=1,
+            max_workers=3,
+            legacy_dir=raw_transcripts_output_dir,
         )
 
-        print("STAGE 3 Complete: HTML transcripts attemped, see logger above for success rate")
+        print(
+            "STAGE 3 Complete: HTML transcripts attemped, see logger above for success rate"
+        )
 
         # =====================================================================
         # STAGE 4: Processing restaurant mentions (which episodes mention which, if any, restaurants)
@@ -177,8 +190,7 @@ def main():
 
         # Check for processed episodes
         episodes_for_timestamping = get_unprocessed_episodes(
-        episodes_metadata_and_mentions_path,
-        timestamps_transcripts_output_filepath 
+            episodes_metadata_and_mentions_path, timestamps_transcripts_output_filepath
         )
         # Save unprocessed episodes (to be processed) into dataframe
         episodes_for_timestamping_path = os.path.join(
@@ -188,7 +200,9 @@ def main():
 
         # Extract new timestamps
         extract_save_clean_text_and_periodic_timestamps(
-            episodes_for_timestamping_path, transcripts_dir, timestamps_transcripts_output_filepath
+            episodes_for_timestamping_path,
+            transcripts_dir,
+            timestamps_transcripts_output_filepath,
         )
 
         print("STAGE 5 Complete: Clean transcripts and timestamps collated.")
@@ -198,7 +212,9 @@ def main():
         # Goal: Match full names (e.g. 'Paul Bakery') and store quote, index and nearest timestamp in a dataframe, for MVP of easy matches
         # Goal: Merge this dataframe with restaurants and regions data ready for output
         # =====================================================================
-        print("\n--- STAGE 6: Fuzzymatch full restaurant mentions (easy wins) and merge with restaurant regions data ---")
+        print(
+            "\n--- STAGE 6: Fuzzymatch full restaurant mentions (easy wins) and merge with restaurant regions data ---"
+        )
 
         # Stage 6.1 Fuzzy matching
         cleaned_transcript_timestamps_filepath = os.path.join(
@@ -209,10 +225,14 @@ def main():
         # So, no need to combine with metadat
         # Combination function results in two restaurant_mentions columns, restaurants_mentions_x and y
         # Which then cannot be read by the matching function
-        cleaned_transcript_timestamps_df = try_read_parquet(cleaned_transcript_timestamps_filepath)
+        cleaned_transcript_timestamps_df = try_read_parquet(
+            cleaned_transcript_timestamps_filepath
+        )
 
         print("attempting easy win mention search")
-        easy_win_mention_search_df = find_top_match_and_timestamps(cleaned_transcript_timestamps_df)
+        easy_win_mention_search_df = find_top_match_and_timestamps(
+            cleaned_transcript_timestamps_df
+        )
 
         easy_wins_mention_search_path = os.path.join(
             PROCESSED_DATA_DIR, "easy_win_mention_search_df.parquet"
@@ -224,20 +244,28 @@ def main():
 
         # Stage 6.2 Merging easy wins with retsaurants and regions data
 
-        matched, unmatched, report = exact_merge_restaurants(restaurants_and_regions_df, easy_win_mention_search_df)
+        matched, unmatched, report = exact_merge_restaurants(
+            restaurants_and_regions_df, easy_win_mention_search_df
+        )
 
         print(f"report: {report}")
         print(f"\n unmatched df head: {unmatched.head()}")
         print(f"\n matched df head: {matched.head()}")
         print(f"\n matched df cols: {matched.columns}")
 
-        print(unmatched[['Restaurant','Episode ID','Mention text']].head(20).to_string())
+        print(
+            unmatched[["Restaurant", "Episode ID", "Mention text"]].head(20).to_string()
+        )
 
-        top_mentions_with_regions_path = os.path.join(PROCESSED_DATA_DIR, "top_mentions_with_regions.csv")
+        top_mentions_with_regions_path = os.path.join(
+            PROCESSED_DATA_DIR, "top_mentions_with_regions.csv"
+        )
 
         matched.to_csv(top_mentions_with_regions_path)
 
-        print("STAGE 6 Complete: First run of fuzzymatches complete. Dataframe merged with restaurant region data")
+        print(
+            "STAGE 6 Complete: First run of fuzzymatches complete. Dataframe merged with restaurant region data"
+        )
 
         # =====================================================================
         # STAGE 7: (Optional) Final Output / Analysis
