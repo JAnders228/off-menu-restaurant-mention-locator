@@ -64,8 +64,9 @@ Output will be saved to data\processed\top_mentions_with_regions.csv
 
 ## Future work
  - Fix bug such that restaurants with multiple mentioning episodes are all scanned
- - Do a second run of 'harder win' mentions, using tokenised mentions (effective in testing)
+ - Improve tokenisation and fuzzymatching protocols to reduce mismatches caused by short tokens existing in restaurant names (e.g. "No" in "Bruno's")
  - Utilise the transcripts on the official website to improve matching (available for many, but not all episodes)
+ - Do a second run of 'harder win' mentions, using tokenised mentions (effective in testing)
  - Use data on audio => text AI transcriptions of restaurant names to enhance search tokens (many transcripts have phonetic spellings due to audio => text conversion)
  - Make full transcripts for restaurant mentioning episodes searchable, to narrow down restaurant recommendations by dish e.g. "pasta"
  - Collate dream menus using fuzzymatching to identify the keywords/phrases that come before it's read
