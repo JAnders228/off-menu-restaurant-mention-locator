@@ -12,7 +12,6 @@ env/
 
 # Data directories (do not commit large data files)
 data/raw/
-data/processed/
 data/test_temp/
 data/analytics/
 
