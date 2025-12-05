@@ -240,7 +240,7 @@ with st.expander("How the app works", expanded=False):
     st.markdown(
         "Controls: \n"
         "- Toggle null matches: by default restaurants with no confident mention are hidden (MVP exclusions).  \n"
-        "- Toggle likely mismatches: by dafault matches from the final 10% of episodes are exlcuded (these are likely dream menu roundup mentions, not main body mentions).  \n"
+        "- Toggle likely mismatches: by default matches from the final 10% of episodes are exlcuded (these are likely dream menu roundup mentions, not main body mentions).  \n"
         "- Toggle all mentions: show mentions of a restaurant from multiple guests instead of just the first guest."
     )
 
