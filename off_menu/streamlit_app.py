@@ -1,4 +1,4 @@
-# app.py (updated to prefer expanded & highlighted mention text)
+# app.py (updated: title, subtitle, and three collapsed info sections)
 import streamlit as st
 import pandas as pd
 import re
@@ -205,20 +205,72 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Off Menu — Top mentions (MVP)")
+# ---------- NEW: Title, subtitle, and three collapsed info sections ----------
+# Title + subtitle (includes link to official restaurants page)
+st.markdown(
+    f"""
+    <div style="padding:6px 0 18px 0;">
+      <h1 style="color:{OFFMENU_TITLE}; margin:0; font-size:34px;">Off Menu Podcast — What did guests say about their dream restaurants?</h1>
+      <div style="margin-top:6px; color:#333;">
+        <em>Do they recommend a dish in particular? What’s the vibe — homey comfort food, fine dining, greasy spoon?</em>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        <a href="https://www.offmenupodcast.co.uk/restaurants" target="_blank">Official restaurants list</a>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Three collapsible sections (collapsed by default)
+with st.expander("How Off Menu works — why make this app", expanded=False):
+    st.write(
+        "In the Off Menu podcast, celebrity guests discuss their dream meals. This has produced an incredible set of "
+        "restaurant recommendations — but episodes are long and it's hard to remember details without re-listening. "
+        "This app surfaces the restaurant mentions, the quote and a timestamp so foodie listeners can "
+        "quickly see what was recommended and why."
+    )
+
+with st.expander("How the app works", expanded=False):
+    st.write(
+        "This app matches restaurants to the transcript quote and the timestamp where they were first mentioned. "
+        "You can search by restaurant, guest, or snippet. Mentions are organised by region to mirror the official "
+        "restaurants list. One planned improvement is to allow full transcripts to be searched for specific dishes, to further help "
+        "people use the list to find what they want."
+    )
+    st.markdown(
+        "Controls: \n"
+        "- Toggle null matches: by default restaurants with no confident mention are hidden (MVP exclusions).  \n"
+        "- Toggle mismatches: exclude matches from the final 10% of episodes (these are often list/roundup mentions).  \n"
+        "- Toggle all mentions: show every mention for a restaurant instead of just the first one."
+    )
+
+with st.expander("Notes & future work", expanded=False):
+    st.write(
+        """Results are based on AI audio → text transcriptions, limiting the transcript accuracy, *especially around place names (like restaurants).*
+        This app prioritises precision, with future work planned to improve coverage"""
+    )
+    st.markdown(
+        "**Planned improvements**\n\n"
+        "- Use official episode transcripts (where available) to improve matching.  \n"
+        "- Build a searchable transcript interface so users can search by dish or cuisine.  \n"
+        "- Run a second 'harder win' match pass using tokenised mentions (effective in testing) \n"
+        "- Add in lower-scoring matches for user exploration.  \n"
+        "- Improve UI for browsing (e.g. restaurant-only lists toggle with click-to-expand menus).  \n"
+        "- Collate dream menus and produce summary analysis."
+    )
 
 # Controls
 with st.sidebar:
     q = st.text_input("Search (restaurant / guest / snippet)", value="")
     st.header("Controls")
     include_nones = st.checkbox(
-        "Include restaurants with no mentions (show 'None')", value=False
+        "Toggle null matches: include restaurants with no mention found", value=False
     )
     show_all_mentions = st.checkbox(
-        "Show all mentions for each restaurant (expander)", value=False
+        "Toggle multiple guest mentions: include all mentions for each restaurant (expander)", value=False
     )
     include_final_10pct = st.checkbox(
-        "Include matches from the final 10% of episode text",
+        "Toggle likely mismatches: include matches from the final 10% of episode text, likely from dream menu summary and not first mention",
         value=False,  # Default is False, so they are excluded
     )
     all_regions = sorted(df["region_header"].unique())
