@@ -235,12 +235,12 @@ with st.expander("How the app works", expanded=False):
         "This app matches restaurants to the transcript quote and the timestamp where they were first mentioned. "
         "You can search by restaurant, guest, or snippet. Mentions are organised by region to mirror the official "
         "restaurants list. One planned improvement is to allow full transcripts to be searched in addition to the matched text, to allow "
-        "users to further explore episodes"
+        "users to further explore episodes for food they like (e.g. to search for pasta)."
     )
     st.markdown(
         "Controls: \n"
         "- Toggle unmatched restaurants: by default restaurants with no [high scoring] match are hidden. \n"
-        "- Toggle multiple guest mentions: show mentions of a restaurant from multiple guests instead of just the first guest."
+        "- Toggle multiple guest mentions: show mentions of a restaurant from multiple guests instead of just the first guest. \n"
         "- Toggle likely mismatches: by default matches from the final 10% of episodes are exlcuded (these are likely dream menu roundup mentions, not main body mentions).  \n"
     )
 
